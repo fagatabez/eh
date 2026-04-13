@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MyAI — Contribute Computing Power</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0a0a0a;
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+    h1 { font-size: 2.5rem; margin-bottom: 10px; }
+    .subtitle { color: #888; margin-bottom: 40px; font-size: 1.1rem; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      width: 100%;
+      max-width: 700px;
+      margin-bottom: 40px;
+    }
+    .stat {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+    }
+    .stat-value { font-size: 2rem; font-weight: 700; color: #7c6af7; }
+    .stat-label { color: #888; font-size: 0.85rem; margin-top: 4px; }
+    .btn {
+      background: #7c6af7;
+      color: white;
+      border: none;
+      padding: 16px 48px;
+      border-radius: 50px;
+      font-size: 1.1rem;
+      cursor: pointer;
+      margin-bottom: 16px;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #6a58e0; }
+    .btn:disabled { background: #444; cursor: not-allowed; }
+    .btn-stop {
+      background: transparent;
+      border: 1px solid #555;
+      color: #888;
+      padding: 12px 32px;
+      border-radius: 50px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      display: none;
+    }
+    .btn-stop:hover { border-color: #888; color: #fff; }
+    .status-box {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 20px;
+      width: 100%;
+      max-width: 700px;
+      margin-top: 30px;
+      font-family: monospace;
+      font-size: 0.85rem;
+      color: #0f0;
+      min-height: 120px;
+      display: none;
+    }
+    .workers-list {
+      width: 100%;
+      max-width: 700px;
+      margin-top: 30px;
+    }
+    .workers-list h3 { color: #888; margin-bottom: 12px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; }
+    .worker-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #222;
+      font-size: 0.9rem;
+    }
+    .worker-id { color: #7c6af7; font-family: monospace; }
+    .download-section {
+      margin-top: 50px;
+      text-align: center;
+      padding: 30px;
+      background: #1a1a1a;
+      border-radius: 12px;
+      width: 100%;
+      max-width: 700px;
+    }
+    .download-section h2 { margin-bottom: 10px; }
+    .download-section p { color: #888; margin-bottom: 20px; font-size: 0.95rem; }
+    .code-block {
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 16px;
+      font-family: monospace;
+      font-size: 0.85rem;
+      color: #0f0;
+      text-align: left;
+      margin-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>MyAI</h1>
+  <p class="subtitle">Help train an AI from scratch by sharing your computing power</p>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-value" id="stat-workers">0</div>
+      <div class="stat-label">Active contributors</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="stat-batches">0</div>
+      <div class="stat-label">Batches in use</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="stat-vram">0 GB</div>
+      <div class="stat-label">Total VRAM contributed</div>
+    </div>
+  </div>
+
+  <button class="btn" id="btn-contribute" onclick="startContributing()">
+    Contribute Computing Power
+  </button>
+  <button class="btn-stop" id="btn-stop" onclick="stopContributing()">
+    Stop Contributing
+  </button>
+
+  <div class="status-box" id="status-box"></div>
+
+  <div class="workers-list">
+    <h3>Active Contributors</h3>
+    <div id="workers-list-inner"></div>
+  </div>
+
+  <div class="download-section">
+    <h2>More Power? Run the Desktop Worker</h2>
+    <p>For full GPU contribution, download and run our worker script</p>
+    <div class="code-block">pip install torch requests</div>
+    <div class="code-block">python worker.py</div>
+    <a href="worker.py" download>
+      <button class="btn">Download worker.py</button>
+    </a>
+  </div>
+
+<script>
+const SERVER = "https://eh-production.up.railway.app/"  // change this
+let workerId  = null
+let pingInterval = null
+let contributing = false
+
+function log(msg) {
+  const box = document.getElementById("status-box")
+  box.style.display = "block"
+  box.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}\n`
+  box.scrollTop = box.scrollHeight
+}
+
+async function startContributing() {
+  document.getElementById("btn-contribute").disabled = true
+  log("Detecting your hardware...")
+
+  // try to get GPU info via WebGL
+  const canvas  = document.createElement("canvas")
+  const gl      = canvas.getContext("webgl")
+  const ext     = gl ? gl.getExtension("WEBGL_debug_renderer_info") : null
+  const gpu     = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "Unknown GPU"
+  const cores   = navigator.hardwareConcurrency || 4
+
+  log(`Found: ${gpu}`)
+  log(`CPU cores: ${cores}`)
+  log(`Connecting to server...`)
+
+  try {
+    const resp = await fetch(`${SERVER}/join`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        worker_id: "web_" + Math.random().toString(36).substr(2, 8),
+        vram_gb:   2,  // web workers get 2GB equivalent
+        gpu_name:  gpu
+      })
+    })
+    const data = await resp.json()
+    workerId   = data.worker_id
+    contributing = true
+
+    log(`Connected! Worker ID: ${workerId.substr(0, 8)}`)
+    log(`Assigned batch size: ${data.batch}`)
+    log(`Contributing... (max 70% GPU usage)`)
+
+    document.getElementById("btn-stop").style.display = "inline-block"
+
+    // heartbeat every 10 seconds
+    pingInterval = setInterval(async () => {
+      try {
+        const r    = await fetch(`${SERVER}/ping`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({worker_id: workerId})
+        })
+        const d = await r.json()
+        if (d.status !== "ok") stopContributing()
+      } catch(e) {
+        log("Connection lost — retrying...")
+      }
+    }, 10000)
+
+  } catch(e) {
+    log(`Could not connect: ${e.message}`)
+    document.getElementById("btn-contribute").disabled = false
+  }
+}
+
+async function stopContributing() {
+  if (!workerId) return
+  clearInterval(pingInterval)
+  try {
+    await fetch(`${SERVER}/leave`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({worker_id: workerId})
+    })
+  } catch(e) {}
+  log("Stopped contributing — batches returned to pool")
+  workerId     = null
+  contributing = false
+  document.getElementById("btn-contribute").disabled = false
+  document.getElementById("btn-stop").style.display  = "none"
+}
+
+// update stats every 5 seconds
+async function updateStats() {
+  try {
+    const resp = await fetch(`${SERVER}/status`)
+    const data = await resp.json()
+    document.getElementById("stat-workers").textContent  = data.workers
+    document.getElementById("stat-batches").textContent  = data.total_batches
+    document.getElementById("stat-vram").textContent     = data.total_vram_gb + " GB"
+
+    const list = document.getElementById("workers-list-inner")
+    list.innerHTML = data.workers_list.map(w => `
+      <div class="worker-row">
+        <span class="worker-id">${w.id}</span>
+        <span>${w.vram} GB VRAM</span>
+        <span>${w.batch} batches</span>
+        <span>${Math.floor(w.uptime/60)}m uptime</span>
+      </div>
+    `).join("")
+  } catch(e) {}
+}
+
+setInterval(updateStats, 5000)
+updateStats()
+</script>
+</body>
+</html>
