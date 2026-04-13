@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MyAI � Contribute Computing Power</title>
+  <title>MyAI — Contribute Computing Power</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -16,171 +16,296 @@
       align-items: center;
       padding: 40px 20px;
     }
-    h1 { font-size: 2.5rem; margin-bottom: 10px; }
-    .subtitle { color: #888; margin-bottom: 40px; font-size: 1.1rem; }
+    h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 8px; }
+    .subtitle { color: #888; margin-bottom: 40px; font-size: 1.05rem; }
+
     .stats {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 20px;
+      gap: 16px;
       width: 100%;
-      max-width: 700px;
-      margin-bottom: 40px;
+      max-width: 720px;
+      margin-bottom: 50px;
     }
     .stat {
-      background: #1a1a1a;
-      border: 1px solid #333;
-      border-radius: 12px;
+      background: #141414;
+      border: 1px solid #2a2a2a;
+      border-radius: 14px;
       padding: 20px;
       text-align: center;
     }
     .stat-value { font-size: 2rem; font-weight: 700; color: #7c6af7; }
-    .stat-label { color: #888; font-size: 0.85rem; margin-top: 4px; }
+    .stat-label { color: #666; font-size: 0.8rem; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    .options {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      width: 100%;
+      max-width: 720px;
+      margin-bottom: 40px;
+    }
+    .option-card {
+      background: #141414;
+      border: 1px solid #2a2a2a;
+      border-radius: 16px;
+      padding: 28px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .option-card.active { border-color: #7c6af7; }
+    .option-tag {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #7c6af7;
+      font-weight: 600;
+    }
+    .option-title { font-size: 1.15rem; font-weight: 600; }
+    .option-desc { color: #777; font-size: 0.88rem; line-height: 1.6; }
+    .option-pros { list-style: none; }
+    .option-pros li { color: #555; font-size: 0.82rem; padding: 2px 0; }
+    .option-pros li::before { content: "✓ "; color: #1D9E75; }
+
     .btn {
       background: #7c6af7;
       color: white;
       border: none;
-      padding: 16px 48px;
-      border-radius: 50px;
-      font-size: 1.1rem;
+      padding: 13px 24px;
+      border-radius: 10px;
+      font-size: 0.95rem;
       cursor: pointer;
-      margin-bottom: 16px;
       transition: background 0.2s;
+      font-weight: 500;
+      width: 100%;
     }
     .btn:hover { background: #6a58e0; }
-    .btn:disabled { background: #444; cursor: not-allowed; }
-    .btn-stop {
+    .btn:disabled { background: #2a2a2a; color: #555; cursor: not-allowed; }
+    .btn-outline {
       background: transparent;
-      border: 1px solid #555;
-      color: #888;
-      padding: 12px 32px;
-      border-radius: 50px;
-      cursor: pointer;
-      font-size: 0.95rem;
-      display: none;
-    }
-    .btn-stop:hover { border-color: #888; color: #fff; }
-    .status-box {
-      background: #1a1a1a;
       border: 1px solid #333;
-      border-radius: 12px;
-      padding: 20px;
+      color: #888;
+      padding: 13px 24px;
+      border-radius: 10px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: all 0.2s;
       width: 100%;
-      max-width: 700px;
-      margin-top: 30px;
+    }
+    .btn-outline:hover { border-color: #666; color: #fff; }
+
+    .log-box {
+      background: #0d0d0d;
+      border: 1px solid #1e1e1e;
+      border-radius: 10px;
+      padding: 16px;
       font-family: monospace;
-      font-size: 0.85rem;
-      color: #0f0;
-      min-height: 120px;
-      display: none;
-    }
-    .workers-list {
+      font-size: 0.8rem;
+      color: #4ade80;
+      min-height: 100px;
       width: 100%;
-      max-width: 700px;
-      margin-top: 30px;
+      max-width: 720px;
+      margin-bottom: 20px;
+      display: none;
+      white-space: pre-wrap;
+      overflow-y: auto;
+      max-height: 200px;
     }
-    .workers-list h3 { color: #888; margin-bottom: 12px; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; }
+
+    .code-block {
+      background: #0d0d0d;
+      border: 1px solid #1e1e1e;
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-family: monospace;
+      font-size: 0.82rem;
+      color: #4ade80;
+      width: 100%;
+      text-align: left;
+      position: relative;
+    }
+    .copy-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: #1e1e1e;
+      border: none;
+      color: #666;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+    .copy-btn:hover { color: #fff; }
+
+    .workers-section {
+      width: 100%;
+      max-width: 720px;
+      margin-top: 40px;
+    }
+    .section-title {
+      color: #444;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
     .worker-row {
       display: flex;
       justify-content: space-between;
-      padding: 10px 0;
-      border-bottom: 1px solid #222;
-      font-size: 0.9rem;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid #1a1a1a;
+      font-size: 0.85rem;
     }
     .worker-id { color: #7c6af7; font-family: monospace; }
-    .download-section {
-      margin-top: 50px;
-      text-align: center;
-      padding: 30px;
+    .worker-badge {
       background: #1a1a1a;
-      border-radius: 12px;
-      width: 100%;
-      max-width: 700px;
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 0.75rem;
+      color: #555;
     }
-    .download-section h2 { margin-bottom: 10px; }
-    .download-section p { color: #888; margin-bottom: 20px; font-size: 0.95rem; }
-    .code-block {
-      background: #111;
-      border: 1px solid #333;
-      border-radius: 8px;
-      padding: 16px;
-      font-family: monospace;
-      font-size: 0.85rem;
-      color: #0f0;
-      text-align: left;
-      margin-bottom: 12px;
+    .dot-online {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      background: #1D9E75;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+
+    @media (max-width: 600px) {
+      .options { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: repeat(3, 1fr); }
     }
   </style>
 </head>
 <body>
 
   <h1>MyAI</h1>
-  <p class="subtitle">Help train an AI from scratch by sharing your computing power</p>
+  <p class="subtitle">Help train an AI from scratch — share your computing power</p>
 
   <div class="stats">
     <div class="stat">
       <div class="stat-value" id="stat-workers">0</div>
-      <div class="stat-label">Active contributors</div>
+      <div class="stat-label">Contributors</div>
     </div>
     <div class="stat">
       <div class="stat-value" id="stat-batches">0</div>
-      <div class="stat-label">Batches in use</div>
+      <div class="stat-label">Batches active</div>
     </div>
     <div class="stat">
       <div class="stat-value" id="stat-vram">0 GB</div>
-      <div class="stat-label">Total VRAM contributed</div>
+      <div class="stat-label">Total VRAM</div>
     </div>
   </div>
 
-  <button class="btn" id="btn-contribute" onclick="startContributing()">
-    Contribute Computing Power
-  </button>
-  <button class="btn-stop" id="btn-stop" onclick="stopContributing()">
-    Stop Contributing
-  </button>
+  <div class="options">
 
-  <div class="status-box" id="status-box"></div>
+    <!-- Option 1: Browser -->
+    <div class="option-card" id="card-browser">
+      <div class="option-tag">Option 1 — instant</div>
+      <div class="option-title">Contribute via browser</div>
+      <div class="option-desc">Click one button and your GPU starts helping — no downloads, no installs.</div>
+      <ul class="option-pros">
+        <li>Works instantly</li>
+        <li>No install needed</li>
+        <li>Stop anytime</li>
+      </ul>
+      <button class="btn" id="btn-browser" onclick="startBrowser()">Start Contributing</button>
+      <button class="btn-outline" id="btn-browser-stop" onclick="stopBrowser()" style="display:none">Stop</button>
+    </div>
 
-  <div class="workers-list">
-    <h3>Active Contributors</h3>
-    <div id="workers-list-inner"></div>
+    <!-- Option 2: Python script -->
+    <div class="option-card" id="card-script">
+      <div class="option-tag">Option 2 — full power</div>
+      <div class="option-title">Contribute via Python script</div>
+      <div class="option-desc">Download and run worker.py to contribute your full GPU power — up to 10x more effective than browser.</div>
+      <ul class="option-pros">
+        <li>Full GPU utilization</li>
+        <li>Runs in background</li>
+        <li>More compute = more impact</li>
+      </ul>
+      <button class="btn" onclick="showScriptInstructions()">Show Instructions</button>
+    </div>
+
   </div>
 
-  <div class="download-section">
-    <h2>More Power? Run the Desktop Worker</h2>
-    <p>For full GPU contribution, download and run our worker script</p>
-    <div class="code-block">pip install torch requests</div>
-    <div class="code-block">python worker.py</div>
-    <a href="worker.py" download>
-      <button class="btn">Download worker.py</button>
-    </a>
+  <!-- Log box -->
+  <div class="log-box" id="log-box"></div>
+
+  <!-- Script instructions (hidden by default) -->
+  <div id="script-instructions" style="display:none; width:100%; max-width:720px; margin-bottom:30px;">
+    <div style="background:#141414; border:1px solid #2a2a2a; border-radius:16px; padding:28px; display:flex; flex-direction:column; gap:14px;">
+      <div style="color:#7c6af7; font-size:0.75rem; text-transform:uppercase; letter-spacing:1px;">Setup — 3 steps</div>
+
+      <div style="color:#aaa; font-size:0.85rem;">Step 1 — Install Python and PyTorch</div>
+      <div class="code-block">
+        pip install torch requests
+        <button class="copy-btn" onclick="copyCode(this)">copy</button>
+      </div>
+
+      <div style="color:#aaa; font-size:0.85rem;">Step 2 — Download the worker script</div>
+      <a href="worker.py" download style="text-decoration:none;">
+        <button class="btn" style="max-width:200px;">Download worker.py</button>
+      </a>
+
+      <div style="color:#aaa; font-size:0.85rem;">Step 3 — Run it</div>
+      <div class="code-block">
+        python worker.py
+        <button class="copy-btn" onclick="copyCode(this)">copy</button>
+      </div>
+
+      <div style="color:#555; font-size:0.8rem;">Your GPU will contribute at max 70% usage. Press Ctrl+C anytime to stop and return your batches to the pool.</div>
+    </div>
+  </div>
+
+  <!-- Active workers -->
+  <div class="workers-section">
+    <div class="section-title">Active contributors</div>
+    <div id="workers-list">
+      <div style="color:#333; font-size:0.85rem; padding:16px 0;">No contributors yet — be the first!</div>
+    </div>
   </div>
 
 <script>
-const SERVER = "https://eh-production.up.railway.app/"  // change this
-let workerId  = null
-let pingInterval = null
-let contributing = false
+const SERVER = "https://eh-production.up.railway.app"
+let browserId   = null
+let browserPing = null
 
 function log(msg) {
-  const box = document.getElementById("status-box")
+  const box = document.getElementById("log-box")
   box.style.display = "block"
-  box.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}\n`
+  const time = new Date().toLocaleTimeString()
+  box.textContent += `[${time}] ${msg}\n`
   box.scrollTop = box.scrollHeight
 }
 
-async function startContributing() {
-  document.getElementById("btn-contribute").disabled = true
-  log("Detecting your hardware...")
+function copyCode(btn) {
+  const text = btn.parentElement.textContent.replace("copy", "").trim()
+  navigator.clipboard.writeText(text)
+  btn.textContent = "copied!"
+  setTimeout(() => btn.textContent = "copy", 2000)
+}
 
-  // try to get GPU info via WebGL
-  const canvas  = document.createElement("canvas")
-  const gl      = canvas.getContext("webgl")
-  const ext     = gl ? gl.getExtension("WEBGL_debug_renderer_info") : null
-  const gpu     = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "Unknown GPU"
-  const cores   = navigator.hardwareConcurrency || 4
+function showScriptInstructions() {
+  const el = document.getElementById("script-instructions")
+  el.style.display = el.style.display === "none" ? "block" : "none"
+}
 
-  log(`Found: ${gpu}`)
-  log(`CPU cores: ${cores}`)
+async function startBrowser() {
+  document.getElementById("btn-browser").disabled = true
+  document.getElementById("card-browser").classList.add("active")
+  log("Detecting hardware...")
+
+  const canvas = document.createElement("canvas")
+  const gl     = canvas.getContext("webgl")
+  const ext    = gl ? gl.getExtension("WEBGL_debug_renderer_info") : null
+  const gpu    = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "Unknown GPU"
+
+  log(`GPU detected: ${gpu}`)
   log(`Connecting to server...`)
 
   try {
@@ -189,81 +314,92 @@ async function startContributing() {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         worker_id: "web_" + Math.random().toString(36).substr(2, 8),
-        vram_gb:   2,  // web workers get 2GB equivalent
-        gpu_name:  gpu
+        vram_gb:   2,
+        gpu_name:  gpu,
+        type:      "browser"
       })
     })
     const data = await resp.json()
-    workerId   = data.worker_id
-    contributing = true
+    browserId  = data.worker_id
 
-    log(`Connected! Worker ID: ${workerId.substr(0, 8)}`)
+    log(`Connected! Worker ID: ${browserId.substr(0, 12)}`)
     log(`Assigned batch size: ${data.batch}`)
-    log(`Contributing... (max 70% GPU usage)`)
+    log(`Contributing computing power... GPU usage capped at 70%`)
 
-    document.getElementById("btn-stop").style.display = "inline-block"
+    document.getElementById("btn-browser-stop").style.display = "block"
 
-    // heartbeat every 10 seconds
-    pingInterval = setInterval(async () => {
+    browserPing = setInterval(async () => {
       try {
-        const r    = await fetch(`${SERVER}/ping`, {
+        const r = await fetch(`${SERVER}/ping`, {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({worker_id: workerId})
+          body: JSON.stringify({worker_id: browserId})
         })
         const d = await r.json()
-        if (d.status !== "ok") stopContributing()
+        if (d.status !== "ok") {
+          log("Server lost — reconnecting...")
+          stopBrowser()
+        }
       } catch(e) {
-        log("Connection lost � retrying...")
+        log("Ping failed — retrying...")
       }
     }, 10000)
 
   } catch(e) {
     log(`Could not connect: ${e.message}`)
-    document.getElementById("btn-contribute").disabled = false
+    log(`Make sure the server is running at ${SERVER}`)
+    document.getElementById("btn-browser").disabled = false
+    document.getElementById("card-browser").classList.remove("active")
   }
 }
 
-async function stopContributing() {
-  if (!workerId) return
-  clearInterval(pingInterval)
+async function stopBrowser() {
+  if (!browserId) return
+  clearInterval(browserPing)
   try {
     await fetch(`${SERVER}/leave`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({worker_id: workerId})
+      body: JSON.stringify({worker_id: browserId})
     })
+    log("Stopped — batches returned to pool. Thanks for contributing!")
   } catch(e) {}
-  log("Stopped contributing � batches returned to pool")
-  workerId     = null
-  contributing = false
-  document.getElementById("btn-contribute").disabled = false
-  document.getElementById("btn-stop").style.display  = "none"
+  browserId = null
+  document.getElementById("btn-browser").disabled = false
+  document.getElementById("btn-browser-stop").style.display = "none"
+  document.getElementById("card-browser").classList.remove("active")
 }
 
-// update stats every 5 seconds
 async function updateStats() {
   try {
     const resp = await fetch(`${SERVER}/status`)
     const data = await resp.json()
+
     document.getElementById("stat-workers").textContent  = data.workers
     document.getElementById("stat-batches").textContent  = data.total_batches
     document.getElementById("stat-vram").textContent     = data.total_vram_gb + " GB"
 
-    const list = document.getElementById("workers-list-inner")
-    list.innerHTML = data.workers_list.map(w => `
-      <div class="worker-row">
-        <span class="worker-id">${w.id}</span>
-        <span>${w.vram} GB VRAM</span>
-        <span>${w.batch} batches</span>
-        <span>${Math.floor(w.uptime/60)}m uptime</span>
-      </div>
-    `).join("")
-  } catch(e) {}
+    const list = document.getElementById("workers-list")
+    if (data.workers_list.length === 0) {
+      list.innerHTML = '<div style="color:#333; font-size:0.85rem; padding:16px 0;">No contributors yet — be the first!</div>'
+    } else {
+      list.innerHTML = data.workers_list.map(w => `
+        <div class="worker-row">
+          <span><span class="dot-online"></span><span class="worker-id">${w.id}</span></span>
+          <span class="worker-badge">${w.vram} GB VRAM</span>
+          <span class="worker-badge">${w.batch} batches</span>
+          <span class="worker-badge">${Math.floor(w.uptime / 60)}m online</span>
+        </div>
+      `).join("")
+    }
+  } catch(e) {
+    document.getElementById("stat-workers").textContent = "?"
+  }
 }
 
 setInterval(updateStats, 5000)
 updateStats()
 </script>
+
 </body>
 </html>
