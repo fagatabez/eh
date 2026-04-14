@@ -14,62 +14,40 @@ app = Flask(__name__)
 CORS(app)
 
 # ═══════════════════════════════════════════════════
-#   LIVE CONFIG  (edit via /config without restarting)
+#   CONFIGURATION
 # ═══════════════════════════════════════════════════
 
-config = {
-    "total_batch":      1000,
-    "max_vram_pct":     0.70,
-    "min_batch":        1,
-    # Conservative: 128 tokens * 4 bytes * ~8 (fwd+bwd) = ~4 KB per sample
-    # Increase if workers run OOM, decrease to assign more batches
-    "bytes_per_sample": 4096,
-}
-
-SECRET_KEY = "Dsadasdsefgtgtlubiemlodydsadasdseflubiemlody1bekekejroliwer2011elo%5dfdsfdsk"
+TOTAL_BATCH      = 1000
+MAX_VRAM_PCT     = 0.70
+MIN_BATCH        = 10
+BYTES_PER_SAMPLE = 4096
+SECRET_KEY       = "Dsadasdsefgtgtlubiemlodydsadasdseflubiemlody1bekekejroliwer2011elo%5dfdsfdsk"
 
 # ═══════════════════════════════════════════════════
 
 workers         = {}
-free_batch      = config["total_batch"]
+free_batch      = TOTAL_BATCH
 lock            = threading.Lock()
 gradient_buffer = defaultdict(list)
 gradient_lock   = threading.Lock()
 training_log    = []
 training_stats  = {
-    "epoch": 0, "total_epochs": 0, "loss": 0,
-    "lr": 0, "status": "idle", "elapsed": 0, "eta": 0,
+    "epoch":        0,
+    "total_epochs": 0,
+    "loss":         0,
+    "lr":           0,
+    "status":       "offline",   # offline | training | done
+    "elapsed":      0,
+    "eta":          0,
+    "last_ping":    0,           # unix timestamp of last train.py ping
 }
 log_lock = threading.Lock()
 
-# CPU bottleneck tracking
-cpu_stats = {
-    "bottleneck":        False,
-    "bottleneck_reason": "",
-    "server_cpu_pct":    0.0,
-    "pending_gradients": 0,
-    "cpu_contributors":  [],   # worker_ids sharing CPU
-}
-cpu_lock = threading.Lock()
-
-# ── Batch capacity calculation ────────────────────
-
-def vram_to_cap(vram_gb: float) -> int:
-    """
-    How many samples fit in vram_gb * max_vram_pct?
-
-        usable_bytes = vram_gb * 1024^3 * max_vram_pct
-        cap          = usable_bytes // bytes_per_sample
-
-    Example: 8 GB, 70%, 4096 bytes/sample
-        = 8 * 1073741824 * 0.70 / 4096
-        = 1,468 samples
-    """
-    usable = vram_gb * (1024 ** 3) * config["max_vram_pct"]
-    cap    = int(usable // config["bytes_per_sample"])
-    return max(config["min_batch"], cap)
-
 # ── Helpers ───────────────────────────────────────
+
+def is_trainer_online():
+    """train.py is considered online if it pinged in the last 30 seconds."""
+    return (time.time() - training_stats.get("last_ping", 0)) < 30
 
 def redistribute_free_batch():
     global free_batch
@@ -82,10 +60,10 @@ def redistribute_free_batch():
     if per_worker == 0:
         return
     for wid, w in eligible.items():
-        give                  = min(per_worker, w["cap"] - w["batch"])
+        can_take              = w["cap"] - w["batch"]
+        give                  = min(per_worker, can_take)
         workers[wid]["batch"] += give
         free_batch            -= give
-    print(f"Redistributed — pool: {free_batch}")
 
 def steal_batches_for_new_worker(needed):
     global free_batch
@@ -95,7 +73,7 @@ def steal_batches_for_new_worker(needed):
     for wid in available:
         if collected >= needed:
             break
-        if workers[wid]["batch"] > config["min_batch"]:
+        if workers[wid]["batch"] > MIN_BATCH:
             workers[wid]["batch"] -= 1
             collected             += 1
     return collected
@@ -109,58 +87,33 @@ def cleanup_dead_workers():
             for wid in dead:
                 freed = workers[wid]["batch"]
                 del workers[wid]
-                with cpu_lock:
-                    if wid in cpu_stats["cpu_contributors"]:
-                        cpu_stats["cpu_contributors"].remove(wid)
                 global free_batch
                 free_batch += freed
                 print(f"Worker {wid[:8]} timed out — freed {freed} — pool: {free_batch}")
                 redistribute_free_batch()
 
-def monitor_cpu():
-    """Check server CPU every 5 s and flag bottleneck if > 85%"""
-    try:
-        import psutil
-        has_psutil = True
-    except ImportError:
-        has_psutil = False
-        print("psutil not installed — CPU monitoring disabled. Run: pip install psutil")
-
-    while True:
-        time.sleep(5)
-        with gradient_lock:
-            pending = len(gradient_buffer.get("losses", []))
-
-        if has_psutil:
-            import psutil
-            cpu_pct = psutil.cpu_percent(interval=1)
-        else:
-            cpu_pct = 0.0
-
-        bottleneck = cpu_pct > 85 and pending > 10
-        with cpu_lock:
-            cpu_stats["server_cpu_pct"]    = round(cpu_pct, 1)
-            cpu_stats["pending_gradients"] = pending
-            cpu_stats["bottleneck"]        = bottleneck
-            cpu_stats["bottleneck_reason"] = (
-                f"Server CPU at {cpu_pct:.0f}% with {pending} gradient batches queued. "
-                "Enable CPU sharing in admin panel to help."
-            ) if bottleneck else ""
+        # if trainer goes offline, mark status
+        with log_lock:
+            if not is_trainer_online() and training_stats["status"] == "training":
+                training_stats["status"] = "offline"
+                training_log.append({
+                    "time": time.strftime("%H:%M:%S"),
+                    "msg":  "train.py disconnected — waiting for it to come back..."
+                })
 
 # ── Worker routes ─────────────────────────────────
 
 @app.route("/join", methods=["POST"])
 def join():
     global free_batch
-    data       = request.json
-    vram_gb    = float(data.get("vram_gb", 4))
-    worker_id  = data.get("worker_id", str(random.randint(10000, 99999)))
-    gpu_name   = data.get("gpu_name", "Unknown")
-    wtype      = data.get("type", "script")
-    share_cpu  = bool(data.get("share_cpu", False))
-    cpu_pct    = float(data.get("cpu_share_pct", 0.0))
+    data      = request.json
+    vram_gb   = float(data.get("vram_gb", 4))
+    worker_id = data.get("worker_id", str(random.randint(10000, 99999)))
+    gpu_name  = data.get("gpu_name", "Unknown")
+    wtype     = data.get("type", "script")
 
-    cap = vram_to_cap(vram_gb)
+    usable_bytes = vram_gb * (1024**3) * MAX_VRAM_PCT
+    cap = max(MIN_BATCH, int(usable_bytes // BYTES_PER_SAMPLE))
 
     with lock:
         if free_batch >= cap:
@@ -173,35 +126,24 @@ def join():
             assigned = steal_batches_for_new_worker(cap)
 
         workers[worker_id] = {
-            "batch":         assigned,
-            "cap":           cap,
-            "vram":          vram_gb,
-            "gpu":           gpu_name,
-            "type":          wtype,
-            "joined":        time.time(),
-            "last_seen":     time.time(),
-            "share_cpu":     share_cpu,
-            "cpu_share_pct": cpu_pct,
+            "batch":     assigned,
+            "cap":       cap,
+            "vram":      vram_gb,
+            "gpu":       gpu_name,
+            "type":      wtype,
+            "joined":    time.time(),
+            "last_seen": time.time()
         }
 
-    if share_cpu and cpu_pct > 0:
-        with cpu_lock:
-            if worker_id not in cpu_stats["cpu_contributors"]:
-                cpu_stats["cpu_contributors"].append(worker_id)
-
-    usable_mb = vram_gb * 1024 * config["max_vram_pct"]
-    print(
-        f"Worker {worker_id[:8]} joined | {wtype} | {vram_gb:.1f} GB "
-        f"({usable_mb:.0f} MB usable) | cap={cap} | assigned={assigned} | "
-        f"pool={free_batch} | cpu_share={cpu_pct:.0f}%"
-    )
+    print(f"Worker {worker_id[:8]} joined | {wtype} | {vram_gb:.1f}GB | batch: {assigned} | pool: {free_batch}")
     return jsonify({
-        "worker_id":        worker_id,
-        "batch":            assigned,
-        "cap":              cap,
-        "status":           "ok",
-        "bytes_per_sample": config["bytes_per_sample"],
-        "max_vram_pct":     config["max_vram_pct"],
+        "worker_id":       worker_id,
+        "batch":           assigned,
+        "cap":             cap,
+        "bytes_per_sample": BYTES_PER_SAMPLE,
+        "max_vram_pct":    MAX_VRAM_PCT,
+        "trainer_online":  is_trainer_online(),
+        "status":          "ok"
     })
 
 @app.route("/ping", methods=["POST"])
@@ -211,19 +153,14 @@ def ping():
     with lock:
         if worker_id in workers:
             workers[worker_id]["last_seen"] = time.time()
-            if "share_cpu" in data:
-                workers[worker_id]["share_cpu"]     = data["share_cpu"]
-                workers[worker_id]["cpu_share_pct"] = float(data.get("cpu_share_pct", 0))
-                with cpu_lock:
-                    if data["share_cpu"] and worker_id not in cpu_stats["cpu_contributors"]:
-                        cpu_stats["cpu_contributors"].append(worker_id)
-                    elif not data["share_cpu"] and worker_id in cpu_stats["cpu_contributors"]:
-                        cpu_stats["cpu_contributors"].remove(worker_id)
             return jsonify({
-                "batch":  workers[worker_id]["batch"],
-                "cap":    workers[worker_id]["cap"],
-                "status": "ok",
-                "config": config,
+                "batch":          workers[worker_id]["batch"],
+                "trainer_online": is_trainer_online(),
+                "config": {
+                    "max_vram_pct":    MAX_VRAM_PCT,
+                    "bytes_per_sample": BYTES_PER_SAMPLE,
+                },
+                "status": "ok"
             })
     return jsonify({"status": "not_found"}), 404
 
@@ -236,9 +173,6 @@ def leave():
         if worker_id in workers:
             freed       = workers[worker_id]["batch"]
             free_batch += freed
-            with cpu_lock:
-                if worker_id in cpu_stats["cpu_contributors"]:
-                    cpu_stats["cpu_contributors"].remove(worker_id)
             del workers[worker_id]
             redistribute_free_batch()
             print(f"Worker {worker_id[:8]} left — freed {freed} — pool: {free_batch}")
@@ -247,27 +181,22 @@ def leave():
 @app.route("/status", methods=["GET"])
 def status():
     with lock:
-        with cpu_lock:
-            cpu_info = dict(cpu_stats)
         return jsonify({
-            "workers":       len(workers),
-            "total_batches": sum(w["batch"] for w in workers.values()),
-            "free_batch":    free_batch,
-            "total_vram_gb": round(sum(w["vram"] for w in workers.values()), 1),
-            "pool_size":     config["total_batch"],
-            "cpu":           cpu_info,
-            "config":        config,
-            "workers_list":  [
+            "workers":        len(workers),
+            "total_batches":  sum(w["batch"] for w in workers.values()),
+            "free_batch":     free_batch,
+            "total_vram_gb":  round(sum(w["vram"] for w in workers.values()), 1),
+            "pool_size":      TOTAL_BATCH,
+            "trainer_online": is_trainer_online(),
+            "workers_list": [
                 {
-                    "id":        wid[:8],
-                    "batch":     w["batch"],
-                    "cap":       w["cap"],
-                    "vram":      w["vram"],
-                    "gpu":       w["gpu"],
-                    "type":      w["type"],
-                    "uptime":    int(time.time() - w["joined"]),
-                    "share_cpu": w.get("share_cpu", False),
-                    "cpu_pct":   w.get("cpu_share_pct", 0),
+                    "id":     wid[:8],
+                    "batch":  w["batch"],
+                    "cap":    w["cap"],
+                    "vram":   w["vram"],
+                    "gpu":    w["gpu"],
+                    "type":   w["type"],
+                    "uptime": int(time.time() - w["joined"])
                 }
                 for wid, w in workers.items()
             ]
@@ -352,6 +281,15 @@ def submit_gradients():
 def get_gradients():
     if request.headers.get("X-Secret-Key") != SECRET_KEY:
         return "Unauthorized", 401
+    # trainer is pinging — mark it online
+    with log_lock:
+        training_stats["last_ping"] = time.time()
+        if training_stats["status"] == "offline":
+            training_stats["status"] = "training"
+            training_log.append({
+                "time": time.strftime("%H:%M:%S"),
+                "msg":  "train.py reconnected!"
+            })
     with gradient_lock:
         if not gradient_buffer.get("losses"):
             return "", 204
@@ -368,6 +306,7 @@ def training_update():
     data = request.json
     with log_lock:
         training_stats.update({k: v for k, v in data.items() if k != "message"})
+        training_stats["last_ping"] = time.time()
         msg = data.get("message")
         if msg:
             training_log.append({"time": time.strftime("%H:%M:%S"), "msg": msg})
@@ -378,64 +317,54 @@ def training_update():
 @app.route("/training_feed", methods=["GET"])
 def training_feed():
     with log_lock:
-        return jsonify({"stats": training_stats, "log": training_log[-50:]})
+        stats = dict(training_stats)
+        stats["trainer_online"] = is_trainer_online()
+        # override status if trainer is actually offline
+        if not is_trainer_online() and stats["status"] == "training":
+            stats["status"] = "offline"
+        return jsonify({"stats": stats, "log": training_log[-50:]})
 
-# ── Config (admin only, live — no restart needed) ─
+# ── Config routes ─────────────────────────────────
 
 @app.route("/config", methods=["GET"])
 def get_config():
-    return jsonify({**config, "free_batch": free_batch})
+    return jsonify({
+        "total_batch":      TOTAL_BATCH,
+        "max_vram_pct":     MAX_VRAM_PCT,
+        "bytes_per_sample": BYTES_PER_SAMPLE,
+        "free_batch":       free_batch,
+        "min_batch":        MIN_BATCH,
+    })
 
 @app.route("/config", methods=["POST"])
 def update_config():
-    global free_batch
+    global TOTAL_BATCH, MAX_VRAM_PCT, BYTES_PER_SAMPLE, free_batch
     if request.headers.get("X-Secret-Key") != SECRET_KEY:
         return "Unauthorized", 401
     data = request.json
     with lock:
         if "total_batch" in data:
-            old                    = config["total_batch"]
-            config["total_batch"]  = int(data["total_batch"])
-            free_batch             = max(0, free_batch + (config["total_batch"] - old))
-            print(f"Batch pool: {old} → {config['total_batch']}")
-
+            old         = TOTAL_BATCH
+            TOTAL_BATCH = int(data["total_batch"])
+            free_batch  = max(0, free_batch + (TOTAL_BATCH - old))
+            print(f"Batch pool: {old} -> {TOTAL_BATCH}")
         if "max_vram_pct" in data:
-            config["max_vram_pct"] = float(data["max_vram_pct"])
-            # recalculate caps LIVE — workers are NOT disconnected
-            for wid, w in workers.items():
-                new_cap    = vram_to_cap(w["vram"])
-                w["cap"]   = new_cap
-                if w["batch"] > new_cap:
-                    excess       = w["batch"] - new_cap
-                    w["batch"]   = new_cap
-                    free_batch  += excess
-            print(f"max_vram_pct → {config['max_vram_pct']*100:.0f}% (caps updated live)")
-
-        if "min_batch" in data:
-            config["min_batch"] = int(data["min_batch"])
-
+            MAX_VRAM_PCT = float(data["max_vram_pct"])
+            print(f"Max VRAM: {MAX_VRAM_PCT}")
         if "bytes_per_sample" in data:
-            config["bytes_per_sample"] = int(data["bytes_per_sample"])
-            # recalculate caps with new bytes_per_sample
-            for wid, w in workers.items():
-                w["cap"] = vram_to_cap(w["vram"])
-
-    return jsonify({"status": "ok", "config": config, "free_batch": free_batch})
-
-# ── CPU status ────────────────────────────────────
-
-@app.route("/cpu_status", methods=["GET"])
-def get_cpu_status():
-    with cpu_lock:
-        return jsonify(cpu_stats)
+            BYTES_PER_SAMPLE = int(data["bytes_per_sample"])
+            print(f"Bytes/sample: {BYTES_PER_SAMPLE}")
+    return jsonify({
+        "status":           "ok",
+        "total_batch":      TOTAL_BATCH,
+        "max_vram_pct":     MAX_VRAM_PCT,
+        "bytes_per_sample": BYTES_PER_SAMPLE,
+    })
 
 # ── Start ─────────────────────────────────────────
 
 if __name__ == "__main__":
     threading.Thread(target=cleanup_dead_workers, daemon=True).start()
-    threading.Thread(target=monitor_cpu,          daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
-    print(f"Server :{port} | pool={config['total_batch']} | "
-          f"max_vram={config['max_vram_pct']*100:.0f}% | "
-          f"bytes_per_sample={config['bytes_per_sample']}")
+    print(f"Server on port {port} | pool: {TOTAL_BATCH} | max VRAM: {MAX_VRAM_PCT*100:.0f}%")
     app.run(host="0.0.0.0", port=port)
