@@ -20,7 +20,7 @@ CORS(app)
 TOTAL_BATCH  = 1000
 MAX_VRAM_PCT = 0.70
 MIN_BATCH    = 10
-SECRET_KEY   = "Dsadasdsefgtgtlubiemlodydsadasdseflubiemlody1bekekejroliwer2011elo%5dfdsfdsk"  # change this!
+SECRET_KEY   = "Dsadasdsefgtgtlubiemlodydsadasdseflubiemlody1bekekejroliwer2011elo%5dfdsfdsk"
 
 # ═══════════════════════════════════════════════════
 
@@ -29,40 +29,36 @@ free_batch      = TOTAL_BATCH
 lock            = threading.Lock()
 gradient_buffer = defaultdict(list)
 gradient_lock   = threading.Lock()
+training_log    = []
+training_stats  = {
+    "epoch":        0,
+    "total_epochs": 0,
+    "loss":         0,
+    "lr":           0,
+    "status":       "idle",
+    "elapsed":      0,
+    "eta":          0,
+}
+log_lock = threading.Lock()
 
-# ── Worker pool management ────────────────────────
-
-def cleanup_dead_workers():
-    while True:
-        time.sleep(10)
-        with lock:
-            dead = [wid for wid, w in workers.items()
-                    if time.time() - w["last_seen"] > 30]
-            for wid in dead:
-                freed = workers[wid]["batch"]
-                del workers[wid]
-                global free_batch
-                free_batch += freed
-                print(f"Worker {wid[:8]} timed out — freed {freed} batches — pool: {free_batch}")
-                redistribute_free_batch()
+# ── Helpers ───────────────────────────────────────
 
 def redistribute_free_batch():
     global free_batch
     if free_batch <= 0 or not workers:
         return
-    eligible = {wid: w for wid, w in workers.items()
-                if w["batch"] < w["cap"]}
+    eligible = {wid: w for wid, w in workers.items() if w["batch"] < w["cap"]}
     if not eligible:
         return
     per_worker = free_batch // len(eligible)
     if per_worker == 0:
         return
     for wid, w in eligible.items():
-        can_take             = w["cap"] - w["batch"]
-        give                 = min(per_worker, can_take)
+        can_take              = w["cap"] - w["batch"]
+        give                  = min(per_worker, can_take)
         workers[wid]["batch"] += give
         free_batch            -= give
-    print(f"Redistributed — pool now: {free_batch}")
+    print(f"Redistributed — pool: {free_batch}")
 
 def steal_batches_for_new_worker(needed):
     global free_batch
@@ -76,6 +72,20 @@ def steal_batches_for_new_worker(needed):
             workers[wid]["batch"] -= 1
             collected             += 1
     return collected
+
+def cleanup_dead_workers():
+    while True:
+        time.sleep(10)
+        with lock:
+            dead = [wid for wid, w in workers.items()
+                    if time.time() - w["last_seen"] > 30]
+            for wid in dead:
+                freed = workers[wid]["batch"]
+                del workers[wid]
+                global free_batch
+                free_batch += freed
+                print(f"Worker {wid[:8]} timed out — freed {freed} — pool: {free_batch}")
+                redistribute_free_batch()
 
 # ── Worker routes ─────────────────────────────────
 
@@ -136,7 +146,7 @@ def leave():
             free_batch += freed
             del workers[worker_id]
             redistribute_free_batch()
-            print(f"Worker {worker_id[:8]} left — freed {freed} batches — pool: {free_batch}")
+            print(f"Worker {worker_id[:8]} left — freed {freed} — pool: {free_batch}")
     return jsonify({"status": "ok"})
 
 @app.route("/status", methods=["GET"])
@@ -165,7 +175,6 @@ def status():
 
 @app.route("/model", methods=["GET"])
 def get_model():
-    """Send current model weights to worker"""
     if os.path.exists("myai.pt"):
         with open("myai.pt", "rb") as f:
             return f.read(), 200, {"Content-Type": "application/octet-stream"}
@@ -173,43 +182,39 @@ def get_model():
 
 @app.route("/model", methods=["POST"])
 def upload_model():
-    """train.py uploads updated model weights"""
     key = request.headers.get("X-Secret-Key")
     if key != SECRET_KEY:
         return "Unauthorized", 401
     with open("myai.pt", "wb") as f:
         f.write(request.data)
-    print("Model updated by train.py")
+    print("Model updated")
     return jsonify({"status": "ok"})
 
 @app.route("/tokenizer", methods=["GET"])
 def get_tokenizer():
-    """Send tokenizer to worker"""
     if os.path.exists("tokenizer.json"):
         return jsonify(json.load(open("tokenizer.json")))
     return "No tokenizer yet", 404
 
 @app.route("/tokenizer", methods=["POST"])
 def upload_tokenizer():
-    """train.py uploads tokenizer"""
     key = request.headers.get("X-Secret-Key")
     if key != SECRET_KEY:
         return "Unauthorized", 401
     with open("tokenizer.json", "w") as f:
         json.dump(request.json, f)
-    print("Tokenizer updated by train.py")
+    print("Tokenizer updated")
     return jsonify({"status": "ok"})
 
 @app.route("/get_batch", methods=["GET"])
 def get_batch():
-    """Give worker a batch of tokenized training data"""
     if not os.path.exists("training_data.txt.gz"):
         return "", 204
     with gzip.open("training_data.txt.gz", "rt", encoding="utf-8") as f:
         text = f.read()
     size  = int(request.args.get("size", 32))
     start = random.randint(0, max(0, len(text) - size * 200))
-    chunk = text[start : start + size * 200]
+    chunk = text[start: start + size * 200]
     tokens = []
     for i in range(0, min(len(chunk), size * 128), 128):
         row = [ord(c) % 30000 for c in chunk[i:i+128]]
@@ -225,7 +230,6 @@ def get_batch():
 
 @app.route("/training_data", methods=["POST"])
 def upload_training_data():
-    """train.py uploads training data so workers can get batches"""
     key = request.headers.get("X-Secret-Key")
     if key != SECRET_KEY:
         return "Unauthorized", 401
@@ -238,7 +242,6 @@ def upload_training_data():
 
 @app.route("/submit_gradients", methods=["POST"])
 def submit_gradients():
-    """Receive gradients from worker"""
     data = request.json
     with gradient_lock:
         gradient_buffer["losses"].append(data["loss"])
@@ -246,12 +249,11 @@ def submit_gradients():
             if name not in gradient_buffer:
                 gradient_buffer[name] = []
             gradient_buffer[name].append(grad)
-    print(f"Gradients from {data['worker_id'][:8]} | loss: {data['loss']:.4f} | params: {len(data['grads'])}")
+    print(f"Gradients from {data['worker_id'][:8]} | loss: {data['loss']:.4f}")
     return jsonify({"status": "ok"})
 
 @app.route("/get_gradients", methods=["GET"])
 def get_gradients():
-    """train.py polls this to get accumulated gradients from all workers"""
     key = request.headers.get("X-Secret-Key")
     if key != SECRET_KEY:
         return "Unauthorized", 401
@@ -262,12 +264,68 @@ def get_gradients():
         gradient_buffer.clear()
     return jsonify(result)
 
+# ── Training feed routes ──────────────────────────
+
+@app.route("/training_update", methods=["POST"])
+def training_update():
+    key = request.headers.get("X-Secret-Key")
+    if key != SECRET_KEY:
+        return "Unauthorized", 401
+    data = request.json
+    with log_lock:
+        training_stats.update({k: v for k, v in data.items() if k != "message"})
+        msg = data.get("message")
+        if msg:
+            training_log.append({
+                "time": time.strftime("%H:%M:%S"),
+                "msg":  msg
+            })
+        if len(training_log) > 200:
+            training_log.pop(0)
+    return jsonify({"status": "ok"})
+
+@app.route("/training_feed", methods=["GET"])
+def training_feed():
+    with log_lock:
+        return jsonify({
+            "stats": training_stats,
+            "log":   training_log[-50:]
+        })
+
+# ── Config routes ─────────────────────────────────
+
+@app.route("/config", methods=["GET"])
+def get_config():
+    return jsonify({
+        "total_batch":  TOTAL_BATCH,
+        "max_vram_pct": MAX_VRAM_PCT,
+        "free_batch":   free_batch,
+        "min_batch":    MIN_BATCH,
+    })
+
+@app.route("/config", methods=["POST"])
+def update_config():
+    global TOTAL_BATCH, MAX_VRAM_PCT, free_batch
+    key = request.headers.get("X-Secret-Key")
+    if key != SECRET_KEY:
+        return "Unauthorized", 401
+    data = request.json
+    with lock:
+        if "total_batch" in data:
+            old         = TOTAL_BATCH
+            TOTAL_BATCH = int(data["total_batch"])
+            free_batch  = max(0, free_batch + (TOTAL_BATCH - old))
+            print(f"Batch pool updated: {old} -> {TOTAL_BATCH}")
+        if "max_vram_pct" in data:
+            MAX_VRAM_PCT = float(data["max_vram_pct"])
+            print(f"Max VRAM updated: {MAX_VRAM_PCT}")
+    return jsonify({"status": "ok", "total_batch": TOTAL_BATCH, "max_vram_pct": MAX_VRAM_PCT})
+
 # ── Start ─────────────────────────────────────────
 
 if __name__ == "__main__":
     t = threading.Thread(target=cleanup_dead_workers, daemon=True)
     t.start()
     port = int(os.environ.get("PORT", 5000))
-    print(f"Server starting on port {port}")
-    print(f"Batch pool: {TOTAL_BATCH} | Max VRAM: {MAX_VRAM_PCT*100:.0f}%")
+    print(f"Server on port {port} | pool: {TOTAL_BATCH} | max VRAM: {MAX_VRAM_PCT*100:.0f}%")
     app.run(host="0.0.0.0", port=port)
