@@ -5,372 +5,364 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MyAI — Contribute Computing Power</title>
   <style>
-    * { margin:0; padding:0; box-sizing:border-box; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background:#0a0a0a; color:#fff;
-      min-height:100vh; display:flex; flex-direction:column;
-      align-items:center; padding:40px 20px;
+      background: #0a0a0a; color: #fff;
+      min-height: 100vh; display: flex; flex-direction: column;
+      align-items: center; padding: 40px 20px;
     }
-    h1 { font-size:2.5rem; font-weight:700; margin-bottom:8px; }
-    .subtitle { color:#888; margin-bottom:40px; font-size:1.05rem; }
+    h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 8px; }
+    .subtitle { color: #888; margin-bottom: 40px; font-size: 1.05rem; }
 
     .stats {
-      display:grid; grid-template-columns:repeat(4,1fr);
-      gap:16px; width:100%; max-width:760px; margin-bottom:30px;
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      gap: 16px; width: 100%; max-width: 820px; margin-bottom: 50px;
     }
     .stat {
-      background:#141414; border:1px solid #2a2a2a;
-      border-radius:14px; padding:18px; text-align:center;
+      background: #141414; border: 1px solid #2a2a2a;
+      border-radius: 14px; padding: 20px; text-align: center;
     }
-    .stat-value { font-size:1.6rem; font-weight:700; color:#7c6af7; }
-    .stat-label { color:#666; font-size:0.72rem; margin-top:4px;
-                  text-transform:uppercase; letter-spacing:0.5px; }
+    .stat-value { font-size: 1.8rem; font-weight: 700; color: #7c6af7; }
+    .stat-label { color: #666; font-size: 0.78rem; margin-top: 4px;
+      text-transform: uppercase; letter-spacing: 0.5px; }
 
-    /* ── offline banner ── */
-    .offline-banner {
-      width:100%; max-width:760px; margin-bottom:20px;
-      background:#1a0a0a; border:1px solid #5a1a1a;
-      border-radius:12px; padding:16px 20px;
-      display:flex; align-items:center; gap:12px;
+    .bottleneck-banner {
+      display: none; width: 100%; max-width: 820px;
+      background: #1a0f0f; border: 1px solid #7f2020;
+      border-radius: 12px; padding: 14px 18px;
+      margin-bottom: 24px; color: #f87171; font-size: 0.88rem;
     }
-    .offline-dot {
-      width:10px; height:10px; border-radius:50%;
-      background:#E24B4A; flex-shrink:0;
-      animation: pulse 2s ease-in-out infinite;
-    }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-    .offline-text { font-size:0.9rem; color:#c44; }
-    .offline-sub  { font-size:0.8rem; color:#554; margin-top:2px; }
 
-    /* ── training box ── */
-    .training-box {
-      width:100%; max-width:760px; margin-bottom:30px;
-      background:#141414; border:1px solid #2a2a2a;
-      border-radius:16px; overflow:hidden;
-    }
-    .training-header {
-      padding:16px 20px; border-bottom:1px solid #1e1e1e;
-      display:flex; justify-content:space-between; align-items:center;
-    }
-    .training-title { font-weight:500; font-size:0.95rem; }
-    .status-pill {
-      font-size:0.72rem; padding:4px 12px; border-radius:20px;
-    }
-    .pill-training { background:#0f2e1a; color:#1D9E75; }
-    .pill-idle     { background:#1e1e1e; color:#555; }
-    .pill-offline  { background:#2e0f0f; color:#E24B4A; }
-    .pill-done     { background:#0f1e2e; color:#378ADD; }
-
-    .training-progress {
-      padding:16px 20px; border-bottom:1px solid #1e1e1e;
-      display:grid; grid-template-columns:repeat(4,1fr); gap:12px;
-    }
-    .prog-item { text-align:center; }
-    .prog-value { font-size:1.3rem; font-weight:600; }
-    .prog-label { font-size:0.7rem; color:#555; text-transform:uppercase;
-                  letter-spacing:0.5px; margin-top:2px; }
-    .progress-bar-wrap { padding:12px 20px; border-bottom:1px solid #1e1e1e; }
-    .progress-bar { height:4px; background:#1e1e1e; border-radius:2px; overflow:hidden; }
-    .progress-bar-fill {
-      height:100%; background:#7c6af7; border-radius:2px; transition:width 1s ease;
-    }
-    .log-output {
-      font-family:monospace; font-size:0.78rem; color:#4ade80;
-      padding:14px 20px; max-height:180px; overflow-y:auto; background:#0d0d0d;
-    }
-    .log-line { padding:1px 0; }
-    .log-time  { color:#333; margin-right:8px; }
-
-    /* ── options ── */
     .options {
-      display:grid; grid-template-columns:1fr 1fr;
-      gap:20px; width:100%; max-width:760px; margin-bottom:30px;
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 20px; width: 100%; max-width: 820px; margin-bottom: 40px;
     }
     .option-card {
-      background:#141414; border:1px solid #2a2a2a;
-      border-radius:16px; padding:26px 22px;
-      display:flex; flex-direction:column; gap:12px;
+      background: #141414; border: 1px solid #2a2a2a;
+      border-radius: 16px; padding: 28px 24px;
+      display: flex; flex-direction: column; gap: 12px;
     }
-    .option-card.active { border-color:#7c6af7; }
-    .option-tag { font-size:0.7rem; text-transform:uppercase;
-                  letter-spacing:1px; color:#7c6af7; font-weight:600; }
-    .option-title { font-size:1.1rem; font-weight:600; }
-    .option-desc { color:#777; font-size:0.86rem; line-height:1.6; }
-    .option-pros { list-style:none; }
-    .option-pros li { color:#555; font-size:0.8rem; padding:2px 0; }
-    .option-pros li::before { content:"✓ "; color:#1D9E75; }
+    .option-card.active { border-color: #7c6af7; }
+    .option-tag { font-size: 0.7rem; text-transform: uppercase;
+      letter-spacing: 1px; color: #7c6af7; font-weight: 600; }
+    .option-title { font-size: 1.15rem; font-weight: 600; }
+    .option-desc { color: #777; font-size: 0.88rem; line-height: 1.6; }
+    .option-pros { list-style: none; }
+    .option-pros li { color: #555; font-size: 0.82rem; padding: 2px 0; }
+    .option-pros li::before { content: "✓ "; color: #1D9E75; }
 
-    /* notice when trainer offline */
-    .worker-notice {
-      background:#1a1000; border:1px solid #3a2800; border-radius:8px;
-      padding:10px 14px; font-size:0.8rem; color:#997722;
+    .vram-info {
+      background: #0d0d0d; border: 1px solid #1e1e1e;
+      border-radius: 8px; padding: 10px 14px;
+      font-family: monospace; font-size: 0.78rem; color: #4ade80;
+      display: none; line-height: 1.8;
     }
 
     .btn {
-      background:#7c6af7; color:#fff; border:none;
-      padding:12px 20px; border-radius:10px; font-size:0.92rem;
-      cursor:pointer; transition:background 0.2s; font-weight:500; width:100%;
+      background: #7c6af7; color: white; border: none;
+      padding: 13px 24px; border-radius: 10px; font-size: 0.95rem;
+      cursor: pointer; transition: background 0.2s; font-weight: 500; width: 100%;
     }
-    .btn:hover { background:#6a58e0; }
-    .btn:disabled { background:#2a2a2a; color:#555; cursor:not-allowed; }
+    .btn:hover { background: #6a58e0; }
+    .btn:disabled { background: #2a2a2a; color: #555; cursor: not-allowed; }
     .btn-outline {
-      background:transparent; border:1px solid #333; color:#888;
-      padding:12px 20px; border-radius:10px; font-size:0.92rem;
-      cursor:pointer; transition:all 0.2s; width:100%;
+      background: transparent; border: 1px solid #333; color: #888;
+      padding: 13px 24px; border-radius: 10px; font-size: 0.95rem;
+      cursor: pointer; transition: all 0.2s; width: 100%;
     }
-    .btn-outline:hover { border-color:#666; color:#fff; }
+    .btn-outline:hover { border-color: #666; color: #fff; }
+    .btn-sm {
+      background: #7c6af7; color: white; border: none;
+      padding: 8px 16px; border-radius: 8px; font-size: 0.82rem;
+      cursor: pointer; font-weight: 500;
+    }
+    .btn-sm:hover { background: #6a58e0; }
+    .btn-danger {
+      background: transparent; border: 1px solid #7f2020; color: #f87171;
+      padding: 8px 16px; border-radius: 8px; font-size: 0.82rem; cursor: pointer;
+    }
+    .btn-danger:hover { background: #7f1d1d; }
 
-    .browser-log {
-      background:#0d0d0d; border:1px solid #1e1e1e; border-radius:10px;
-      padding:14px 16px; font-family:monospace; font-size:0.78rem; color:#4ade80;
-      min-height:60px; width:100%; max-width:760px; margin-bottom:20px;
-      display:none; white-space:pre-wrap; overflow-y:auto; max-height:140px;
+    .cpu-toggle { display: flex; align-items: center; gap: 10px; }
+    .toggle-switch {
+      position: relative; width: 42px; height: 22px;
+      background: #333; border-radius: 11px; cursor: pointer;
+      transition: background 0.2s; flex-shrink: 0;
     }
+    .toggle-switch.on { background: #7c6af7; }
+    .toggle-knob {
+      position: absolute; top: 3px; left: 3px;
+      width: 16px; height: 16px; background: #fff;
+      border-radius: 50%; transition: left 0.2s;
+    }
+    .toggle-switch.on .toggle-knob { left: 23px; }
+    .toggle-label { color: #666; font-size: 0.82rem; }
+    .cpu-pct-row { display: none; align-items: center; gap: 10px; }
+    .cpu-pct-row input[type=range] { flex: 1; accent-color: #7c6af7; }
+    .cpu-pct-val { color: #7c6af7; font-size: 0.85rem; min-width: 32px; }
 
-    /* ── script section ── */
-    #script-section {
-      width:100%; max-width:760px; margin-bottom:28px; display:none;
+    .log-box {
+      background: #0d0d0d; border: 1px solid #1e1e1e; border-radius: 10px;
+      padding: 16px; font-family: monospace; font-size: 0.8rem;
+      color: #4ade80; min-height: 100px; width: 100%; max-width: 820px;
+      margin-bottom: 20px; display: none; white-space: pre-wrap;
+      overflow-y: auto; max-height: 200px;
     }
-    .script-card {
-      background:#141414; border:1px solid #2a2a2a; border-radius:16px;
-      padding:24px; display:flex; flex-direction:column; gap:14px;
-    }
-    .step-label { color:#aaa; font-size:0.84rem; }
     .code-block {
-      background:#0d0d0d; border:1px solid #1e1e1e; border-radius:8px;
-      padding:13px 16px; font-family:monospace; font-size:0.8rem;
-      color:#4ade80; position:relative;
+      background: #0d0d0d; border: 1px solid #1e1e1e; border-radius: 8px;
+      padding: 14px 16px; font-family: monospace; font-size: 0.82rem;
+      color: #4ade80; width: 100%; text-align: left; position: relative;
     }
     .copy-btn {
-      position:absolute; top:8px; right:8px; background:#1e1e1e;
-      border:none; color:#666; padding:4px 10px; border-radius:6px;
-      font-size:0.73rem; cursor:pointer;
+      position: absolute; top: 8px; right: 8px; background: #1e1e1e;
+      border: none; color: #666; padding: 4px 10px; border-radius: 6px;
+      font-size: 0.75rem; cursor: pointer;
     }
-    .copy-btn:hover { color:#fff; }
+    .copy-btn:hover { color: #fff; }
 
-    /* ── admin ── */
-    .admin-section {
-      width:100%; max-width:760px; margin-bottom:28px;
-      background:#141414; border:1px solid #2a2a2a; border-radius:16px; overflow:hidden;
+    .workers-section { width: 100%; max-width: 820px; margin-top: 40px; }
+    .section-title {
+      color: #444; font-size: 0.75rem; text-transform: uppercase;
+      letter-spacing: 1px; margin-bottom: 12px;
+    }
+    .worker-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 0; border-bottom: 1px solid #1a1a1a; font-size: 0.85rem;
+      flex-wrap: wrap; gap: 6px;
+    }
+    .worker-id { color: #7c6af7; font-family: monospace; }
+    .worker-badge {
+      background: #1a1a1a; border-radius: 6px; padding: 2px 8px;
+      font-size: 0.75rem; color: #555;
+    }
+    .worker-badge.full { color: #4ade80; }
+    .worker-badge.cpu  { color: #f59e0b; }
+    .dot-online {
+      display: inline-block; width: 6px; height: 6px;
+      background: #1D9E75; border-radius: 50%; margin-right: 6px;
+    }
+
+    /* Admin unlock — very subtle, looks like a footer field */
+    #admin-unlock {
+      width: 100%; max-width: 820px;
+      margin-top: 60px; margin-bottom: 10px;
+      display: flex; justify-content: flex-end;
+    }
+    #admin-unlock input {
+      background: transparent; border: none; border-bottom: 1px solid #1a1a1a;
+      color: #222; font-size: 0.75rem; padding: 4px 6px; outline: none;
+      width: 140px; transition: color 0.2s;
+    }
+    #admin-unlock input:focus { color: #555; border-color: #333; }
+    #admin-unlock input::placeholder { color: #1a1a1a; }
+    #admin-err { color: #7f2020; font-size: 0.72rem; margin-left: 8px; display: none; }
+
+    /* Admin panel */
+    #admin-panel {
+      display: none; width: 100%; max-width: 820px; margin-bottom: 40px;
+    }
+    .admin-card {
+      background: #0f0f1a; border: 1px solid #3730a3;
+      border-radius: 16px; padding: 28px;
     }
     .admin-header {
-      padding:15px 20px; border-bottom:1px solid transparent;
-      cursor:pointer; display:flex; justify-content:space-between; align-items:center;
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 20px;
     }
-    .admin-header:hover { background:#1a1a1a; }
-    .admin-body { padding:20px; display:none; border-top:1px solid #1e1e1e; }
-    .admin-row  { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
-    .admin-label { color:#888; font-size:0.83rem; min-width:160px; }
-    .admin-input {
-      background:#0d0d0d; border:1px solid #2a2a2a; color:#fff;
-      padding:7px 11px; border-radius:8px; font-size:0.88rem; width:110px;
+    .admin-title {
+      color: #a5b4fc; font-size: 0.75rem; text-transform: uppercase;
+      letter-spacing: 1px; font-weight: 600;
     }
-    .admin-btn {
-      background:#7c6af7; color:#fff; border:none; padding:7px 16px;
-      border-radius:8px; cursor:pointer; font-size:0.83rem;
+    .admin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .admin-field label {
+      display: block; color: #555; font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
     }
-    .admin-msg { font-size:0.78rem; margin-top:6px; }
+    .admin-field input {
+      width: 100%; background: #1a1a2e; border: 1px solid #2a2a4a;
+      border-radius: 8px; padding: 10px 12px; color: #a5b4fc;
+      font-size: 0.9rem; outline: none;
+    }
+    .admin-field input:focus { border-color: #7c6af7; }
+    .admin-field .hint { color: #333; font-size: 0.73rem; margin-top: 4px; }
+    .admin-actions { margin-top: 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .admin-saved { color: #4ade80; font-size: 0.82rem; display: none; }
+    .admin-cpu-box {
+      margin-top: 16px; background: #0a0a14; border: 1px solid #1e1e3a;
+      border-radius: 10px; padding: 14px;
+      font-family: monospace; font-size: 0.8rem; color: #444;
+    }
 
-    /* ── workers list ── */
-    .workers-section { width:100%; max-width:760px; margin-top:8px; }
-    .section-title { color:#444; font-size:0.72rem; text-transform:uppercase;
-                     letter-spacing:1px; margin-bottom:12px; }
-    .worker-row {
-      display:flex; justify-content:space-between; align-items:center;
-      padding:11px 0; border-bottom:1px solid #1a1a1a; font-size:0.83rem;
-    }
-    .worker-id { color:#7c6af7; font-family:monospace; }
-    .worker-badge {
-      background:#1a1a1a; border-radius:6px; padding:2px 8px;
-      font-size:0.73rem; color:#555;
-    }
-    .dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:6px; }
-    .dot-green { background:#1D9E75; }
-
-    @media (max-width:600px) {
-      .options { grid-template-columns:1fr; }
-      .stats   { grid-template-columns:repeat(2,1fr); }
-      .training-progress { grid-template-columns:repeat(2,1fr); }
+    @media (max-width: 600px) {
+      .options { grid-template-columns: 1fr; }
+      .stats   { grid-template-columns: repeat(2, 1fr); }
+      .admin-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
 
-  <h1>MyAI</h1>
-  <p class="subtitle">Help train an AI from scratch — share your computing power</p>
+<h1>MyAI</h1>
+<p class="subtitle">Help train an AI from scratch — share your computing power</p>
 
-  <!-- offline banner (shown when trainer is offline) -->
-  <div class="offline-banner" id="offline-banner" style="display:none">
-    <div class="offline-dot"></div>
-    <div>
-      <div class="offline-text">Training is not running right now</div>
-      <div class="offline-sub">You can still join — your batches will be saved and used when training resumes</div>
+<div class="stats">
+  <div class="stat">
+    <div class="stat-value" id="stat-workers">0</div>
+    <div class="stat-label">Contributors</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value" id="stat-batches">0</div>
+    <div class="stat-label">Batches active</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value" id="stat-vram">0 GB</div>
+    <div class="stat-label">Total VRAM</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value" id="stat-cpu">—</div>
+    <div class="stat-label">Server CPU</div>
+  </div>
+</div>
+
+<div class="bottleneck-banner" id="bottleneck-banner">
+  ⚠ <b>Server CPU bottleneck</b> — <span id="bottleneck-msg"></span>
+</div>
+
+<div class="options">
+
+  <!-- Browser -->
+  <div class="option-card" id="card-browser">
+    <div class="option-tag">Option 1 — instant</div>
+    <div class="option-title">Contribute via browser</div>
+    <div class="option-desc">Click one button and your GPU starts helping — no downloads, no installs.</div>
+    <ul class="option-pros">
+      <li>Works instantly</li>
+      <li>No install needed</li>
+      <li>Stop anytime</li>
+    </ul>
+    <div class="vram-info" id="vram-info-browser"></div>
+    <div class="cpu-toggle">
+      <div class="toggle-switch" id="cpu-toggle" onclick="toggleCPU()">
+        <div class="toggle-knob"></div>
+      </div>
+      <span class="toggle-label">Share my CPU too</span>
     </div>
+    <div class="cpu-pct-row" id="cpu-pct-row">
+      <input type="range" min="5" max="50" value="10" id="cpu-pct-slider"
+             oninput="document.getElementById('cpu-pct-val').textContent=this.value+'%'">
+      <span class="cpu-pct-val" id="cpu-pct-val">10%</span>
+    </div>
+    <button class="btn" id="btn-browser" onclick="startBrowser()">Start Contributing</button>
+    <button class="btn-outline" id="btn-browser-stop" onclick="stopBrowser()" style="display:none">Stop</button>
   </div>
 
-  <!-- stats row -->
-  <div class="stats">
-    <div class="stat">
-      <div class="stat-value" id="stat-workers">0</div>
-      <div class="stat-label">Contributors</div>
+  <!-- Python script -->
+  <div class="option-card" id="card-script">
+    <div class="option-tag">Option 2 — full power</div>
+    <div class="option-title">Contribute via worker.py</div>
+    <div class="option-desc">Run the worker script to contribute your full GPU. It detects your VRAM and auto-calculates the largest safe batch size.</div>
+    <ul class="option-pros">
+      <li>Auto-calculates batch size from your VRAM</li>
+      <li>Live OOM probe — never crashes</li>
+      <li>Optional CPU sharing</li>
+    </ul>
+    <div class="vram-info" id="vram-info-script" style="display:block">
+      Formula: vram_gb × 1024³ × max_vram% ÷ bytes_per_sample<br>
+      Example (8 GB, 70%): 8 GB ÷ 4096 B = <span style="color:#fff">1,468 batches</span>
     </div>
-    <div class="stat">
-      <div class="stat-value" id="stat-batches">0</div>
-      <div class="stat-label">Batches active</div>
-    </div>
-    <div class="stat">
-      <div class="stat-value" id="stat-vram">0 GB</div>
-      <div class="stat-label">Total VRAM</div>
-    </div>
-    <div class="stat">
-      <div class="stat-value" id="stat-free">0</div>
-      <div class="stat-label">Free batches</div>
-    </div>
+    <button class="btn" onclick="showScriptInstructions()">Show Instructions</button>
   </div>
 
-  <!-- live training output -->
-  <div class="training-box">
-    <div class="training-header">
-      <span class="training-title">Live training output</span>
-      <span class="status-pill pill-idle" id="status-pill">Offline</span>
-    </div>
-    <div class="training-progress">
-      <div class="prog-item">
-        <div class="prog-value" id="prog-epoch">0/0</div>
-        <div class="prog-label">Epoch</div>
-      </div>
-      <div class="prog-item">
-        <div class="prog-value" id="prog-loss">—</div>
-        <div class="prog-label">Loss</div>
-      </div>
-      <div class="prog-item">
-        <div class="prog-value" id="prog-eta">—</div>
-        <div class="prog-label">ETA</div>
-      </div>
-      <div class="prog-item">
-        <div class="prog-value" id="prog-elapsed">—</div>
-        <div class="prog-label">Elapsed</div>
-      </div>
-    </div>
-    <div class="progress-bar-wrap">
-      <div class="progress-bar">
-        <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
-      </div>
-    </div>
-    <div class="log-output" id="training-log">
-      <div class="log-line" style="color:#333">Waiting for training to start...</div>
+</div>
+
+<div class="log-box" id="log-box"></div>
+
+<div id="script-instructions" style="display:none; width:100%; max-width:820px; margin-bottom:30px;">
+  <div style="background:#141414; border:1px solid #2a2a2a; border-radius:16px; padding:28px; display:flex; flex-direction:column; gap:14px;">
+    <div style="color:#7c6af7; font-size:0.75rem; text-transform:uppercase; letter-spacing:1px;">Setup — 3 steps</div>
+    <div style="color:#aaa; font-size:0.85rem;">Step 1 — Install dependencies</div>
+    <div class="code-block">pip install torch requests<button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+    <div style="color:#aaa; font-size:0.85rem;">Step 2 — Download worker.py</div>
+    <a href="worker.py" download style="text-decoration:none;">
+      <button class="btn" style="max-width:200px;">Download worker.py</button>
+    </a>
+    <div style="color:#aaa; font-size:0.85rem;">Step 3 — Run it</div>
+    <div class="code-block">python worker.py<button class="copy-btn" onclick="copyCode(this)">copy</button></div>
+    <div style="color:#444; font-size:0.8rem;">
+      The worker detects your VRAM, calculates the max safe batch size, and does a live OOM probe.
+      Press Ctrl+C to stop gracefully and return batches to the pool.
     </div>
   </div>
+</div>
 
-  <!-- contribute options -->
-  <div class="options">
-
-    <div class="option-card" id="card-browser">
-      <div class="option-tag">Option 1 — instant</div>
-      <div class="option-title">Contribute via browser</div>
-      <div class="option-desc">One click — no downloads needed. Works even when training is paused.</div>
-      <ul class="option-pros">
-        <li>Works instantly</li>
-        <li>No install needed</li>
-        <li>Batches saved for later</li>
-      </ul>
-      <div class="worker-notice" id="offline-notice" style="display:none">
-        Training is offline — your batches will be stored and used when it resumes.
-      </div>
-      <button class="btn" id="btn-browser" onclick="startBrowser()">Start Contributing</button>
-      <button class="btn-outline" id="btn-stop" onclick="stopBrowser()" style="display:none">Stop</button>
-    </div>
-
-    <div class="option-card" id="card-script">
-      <div class="option-tag">Option 2 — full power</div>
-      <div class="option-title">Contribute via Python script</div>
-      <div class="option-desc">Run worker.py on your PC for full GPU power. Up to 10x more effective than browser.</div>
-      <ul class="option-pros">
-        <li>Full GPU utilization</li>
-        <li>Runs in background</li>
-        <li>Batches saved if trainer offline</li>
-      </ul>
-      <button class="btn" onclick="toggleScript()">Show Instructions</button>
-    </div>
-
+<div class="workers-section">
+  <div class="section-title">Active contributors</div>
+  <div id="workers-list">
+    <div style="color:#333; font-size:0.85rem; padding:16px 0;">No contributors yet — be the first!</div>
   </div>
+</div>
 
-  <!-- browser log -->
-  <div class="browser-log" id="browser-log"></div>
+<!-- Admin unlock — hidden visually (dark on dark, small text) -->
+<div id="admin-unlock">
+  <input type="password" id="admin-key" placeholder="admin"
+         onkeydown="if(event.key==='Enter')adminLogin()">
+  <span id="admin-err">✗</span>
+</div>
 
-  <!-- script instructions -->
-  <div id="script-section">
-    <div class="script-card">
-      <div style="color:#7c6af7;font-size:0.72rem;text-transform:uppercase;letter-spacing:1px;">Setup — 3 steps</div>
-      <div class="step-label">Step 1 — install dependencies</div>
-      <div class="code-block">pip install torch requests<button class="copy-btn" onclick="copyCode(this)">copy</button></div>
-      <div class="step-label">Step 2 — download the worker</div>
-      <a href="worker.py" download style="text-decoration:none">
-        <button class="btn" style="max-width:200px">Download worker.py</button>
-      </a>
-      <div class="step-label">Step 3 — run it</div>
-      <div class="code-block">python worker.py<button class="copy-btn" onclick="copyCode(this)">copy</button></div>
-      <div style="color:#555;font-size:0.78rem">GPU capped at 70%. Press Ctrl+C to stop and return batches.</div>
+<!-- Admin panel — only shown after correct key -->
+<div id="admin-panel">
+  <div class="admin-card">
+    <div class="admin-header">
+      <div class="admin-title">⚙ Admin — live config (no restart needed)</div>
+      <button class="btn-danger" onclick="adminLogout()">Lock</button>
     </div>
+
+    <div class="admin-grid">
+      <div class="admin-field">
+        <label>Total batch pool</label>
+        <input type="number" id="cfg-total-batch" min="10">
+        <div class="hint">Total samples distributed across all workers</div>
+      </div>
+      <div class="admin-field">
+        <label>Max VRAM % (0.1 – 1.0)</label>
+        <input type="number" id="cfg-max-vram" min="0.1" max="1.0" step="0.05">
+        <div class="hint">0.70 = 70%. Worker caps recalculate live — nobody disconnects.</div>
+      </div>
+      <div class="admin-field">
+        <label>Bytes per sample</label>
+        <input type="number" id="cfg-bytes-per-sample" min="512" step="256">
+        <div class="hint">Memory cost per training sample. Raise if workers hit OOM.</div>
+      </div>
+      <div class="admin-field">
+        <label>Min batches per worker</label>
+        <input type="number" id="cfg-min-batch" min="1">
+        <div class="hint">Floor — every worker gets at least this many</div>
+      </div>
+    </div>
+
+    <div class="admin-actions">
+      <button class="btn-sm" onclick="adminSave()">Save changes</button>
+      <span class="admin-saved" id="admin-saved">✓ Saved — caps updated live</span>
+    </div>
+
+    <div class="admin-cpu-box" id="admin-cpu-box">CPU data loading...</div>
   </div>
-
-  <!-- admin panel -->
-  <div class="admin-section">
-    <div class="admin-header" onclick="toggleAdmin()">
-      <span style="font-size:0.88rem;color:#666">Admin panel</span>
-      <span style="color:#333;font-size:0.78rem">click to expand</span>
-    </div>
-    <div class="admin-body" id="admin-body">
-      <div style="margin-bottom:16px">
-        <label style="color:#666;font-size:0.78rem;display:block;margin-bottom:8px">Secret key</label>
-        <input type="password" id="admin-key" placeholder="Enter secret key"
-          style="background:#0d0d0d;border:1px solid #2a2a2a;color:#fff;padding:8px 12px;border-radius:8px;width:100%;font-size:0.88rem">
-      </div>
-      <div class="admin-row">
-        <span class="admin-label">Max batch pool</span>
-        <input type="number" class="admin-input" id="cfg-batch" placeholder="1000">
-        <button class="admin-btn" onclick="updateConfig()">Apply</button>
-      </div>
-      <div class="admin-row">
-        <span class="admin-label">Max VRAM % per worker</span>
-        <input type="number" class="admin-input" id="cfg-vram" placeholder="70" min="10" max="100">
-        <button class="admin-btn" onclick="updateConfig()">Apply</button>
-      </div>
-      <div class="admin-row">
-        <span class="admin-label">Bytes per sample</span>
-        <input type="number" class="admin-input" id="cfg-bps" placeholder="4096">
-        <button class="admin-btn" onclick="updateConfig()">Apply</button>
-      </div>
-      <div class="admin-msg" id="admin-msg"></div>
-    </div>
-  </div>
-
-  <!-- active workers -->
-  <div class="workers-section">
-    <div class="section-title">Active contributors</div>
-    <div id="workers-list">
-      <div style="color:#333;font-size:0.83rem;padding:14px 0">No contributors yet — be the first!</div>
-    </div>
-  </div>
+</div>
 
 <script>
 const SERVER   = "https://eh-production.up.railway.app"
 let browserId  = null
 let browserPing = null
-let trainerOnline = false
+let adminKey   = null
+let cpuEnabled = false
+let serverCfg  = { max_vram_pct: 0.70, bytes_per_sample: 4096 }
 
-function fmt(s) {
-  if (s < 60)   return s + "s"
-  if (s < 3600) return Math.floor(s/60) + "m " + (s%60) + "s"
-  return Math.floor(s/3600) + "h " + Math.floor((s%3600)/60) + "m"
-}
-
-function blogLine(msg) {
-  const log  = document.getElementById("browser-log")
-  log.style.display = "block"
-  log.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`
-  log.scrollTop = log.scrollHeight
+function log(msg) {
+  const box = document.getElementById("log-box")
+  box.style.display = "block"
+  box.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`
+  box.scrollTop = box.scrollHeight
 }
 
 function copyCode(btn) {
@@ -380,62 +372,83 @@ function copyCode(btn) {
   setTimeout(() => btn.textContent = "copy", 2000)
 }
 
-function toggleScript() {
-  const el = document.getElementById("script-section")
+function showScriptInstructions() {
+  const el = document.getElementById("script-instructions")
   el.style.display = el.style.display === "none" ? "block" : "none"
 }
 
-function toggleAdmin() {
-  const el = document.getElementById("admin-body")
-  el.style.display = el.style.display === "none" ? "block" : "none"
+function calcBatches(vramGb, maxPct, bps) {
+  return Math.floor(vramGb * 1073741824 * maxPct / bps)
+}
+
+function showVramInfo(vramGb, elementId) {
+  const p   = serverCfg.max_vram_pct
+  const bps = serverCfg.bytes_per_sample
+  const batches  = calcBatches(vramGb, p, bps)
+  const usableMb = (vramGb * 1024 * p).toFixed(0)
+  const el = document.getElementById(elementId)
+  el.style.display = "block"
+  el.innerHTML =
+    `${vramGb.toFixed(1)} GB × ${(p*100).toFixed(0)}% = ${usableMb} MB usable<br>` +
+    `${usableMb} MB ÷ ${bps} B/sample = <span style="color:#fff;font-weight:600">${batches.toLocaleString()} max batches</span>`
+}
+
+function toggleCPU() {
+  cpuEnabled = !cpuEnabled
+  document.getElementById("cpu-toggle").classList.toggle("on", cpuEnabled)
+  document.getElementById("cpu-pct-row").style.display = cpuEnabled ? "flex" : "none"
 }
 
 async function startBrowser() {
   document.getElementById("btn-browser").disabled = true
   document.getElementById("card-browser").classList.add("active")
-  blogLine("Detecting hardware...")
+  log("Detecting hardware...")
 
   const canvas = document.createElement("canvas")
   const gl     = canvas.getContext("webgl")
   const ext    = gl ? gl.getExtension("WEBGL_debug_renderer_info") : null
   const gpu    = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "Unknown GPU"
+  const cpuPct = cpuEnabled ? parseInt(document.getElementById("cpu-pct-slider").value) : 0
 
-  blogLine("GPU: " + gpu)
-  if (!trainerOnline) {
-    blogLine("Note: trainer is offline — your batches will be saved for when it comes back")
-  }
-  blogLine("Connecting...")
+  log(`GPU: ${gpu}`)
+  log("Connecting...")
 
   try {
     const resp = await fetch(`${SERVER}/join`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
-        worker_id: "web_" + Math.random().toString(36).substr(2,8),
-        vram_gb: 2, gpu_name: gpu, type: "browser"
+        worker_id: "web_" + Math.random().toString(36).substr(2, 8),
+        vram_gb: 2, gpu_name: gpu, type: "browser",
+        share_cpu: cpuEnabled, cpu_share_pct: cpuPct,
       })
     })
     const data = await resp.json()
-    browserId  = data.worker_id
-    blogLine(`Connected! ID: ${browserId.substr(0,12)} | batch: ${data.batch}`)
-    blogLine("Contributing — GPU capped at 70%")
-    document.getElementById("btn-stop").style.display = "block"
+    browserId = data.worker_id
+
+    if (data.max_vram_pct)     serverCfg.max_vram_pct     = data.max_vram_pct
+    if (data.bytes_per_sample) serverCfg.bytes_per_sample = data.bytes_per_sample
+
+    showVramInfo(2, "vram-info-browser")
+    log(`Connected! ID: ${browserId.substr(0, 12)}`)
+    log(`Batches: ${data.batch} assigned / ${data.cap} cap`)
+    if (cpuEnabled) log(`CPU sharing: ${cpuPct}%`)
+
+    document.getElementById("btn-browser-stop").style.display = "block"
 
     browserPing = setInterval(async () => {
       try {
         const r = await fetch(`${SERVER}/ping`, {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({worker_id: browserId})
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({worker_id: browserId, share_cpu: cpuEnabled, cpu_share_pct: cpuPct})
         })
         const d = await r.json()
-        if (d.status !== "ok") stopBrowser()
-        if (d.batch !== undefined) {
-          blogLine(`Batch updated: ${d.batch}`)
-        }
-      } catch(e) { blogLine("Ping failed — retrying...") }
+        if (d.status !== "ok") { log("Server lost — stopping"); stopBrowser() }
+      } catch(e) { log("Ping failed — retrying...") }
     }, 10000)
 
   } catch(e) {
-    blogLine("Connection failed: " + e.message)
+    log(`Could not connect: ${e.message}`)
     document.getElementById("btn-browser").disabled = false
     document.getElementById("card-browser").classList.remove("active")
   }
@@ -446,120 +459,134 @@ async function stopBrowser() {
   clearInterval(browserPing)
   try {
     await fetch(`${SERVER}/leave`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({worker_id: browserId})
     })
-    blogLine("Stopped — batches returned. Thanks!")
+    log("Stopped — batches returned. Thanks!")
   } catch(e) {}
   browserId = null
   document.getElementById("btn-browser").disabled = false
-  document.getElementById("btn-stop").style.display = "none"
+  document.getElementById("btn-browser-stop").style.display = "none"
   document.getElementById("card-browser").classList.remove("active")
-}
-
-async function updateConfig() {
-  const key   = document.getElementById("admin-key").value
-  const batch = document.getElementById("cfg-batch").value
-  const vram  = document.getElementById("cfg-vram").value
-  const bps   = document.getElementById("cfg-bps").value
-  const msg   = document.getElementById("admin-msg")
-
-  if (!key) { msg.textContent = "Enter secret key first"; msg.style.color = "#E24B4A"; return }
-
-  const payload = {}
-  if (batch) payload.total_batch      = parseInt(batch)
-  if (vram)  payload.max_vram_pct     = parseInt(vram) / 100
-  if (bps)   payload.bytes_per_sample = parseInt(bps)
-
-  try {
-    const r = await fetch(`${SERVER}/config`, {
-      method:"POST",
-      headers:{"Content-Type":"application/json","X-Secret-Key": key},
-      body: JSON.stringify(payload)
-    })
-    if (r.ok) {
-      const d = await r.json()
-      msg.textContent = `Updated! Pool: ${d.total_batch} | VRAM: ${Math.round(d.max_vram_pct*100)}% | BPS: ${d.bytes_per_sample}`
-      msg.style.color = "#1D9E75"
-    } else {
-      msg.textContent = "Wrong key or error"
-      msg.style.color = "#E24B4A"
-    }
-  } catch(e) {
-    msg.textContent = "Error: " + e.message
-    msg.style.color = "#E24B4A"
-  }
 }
 
 async function updateStats() {
   try {
-    // worker stats
-    const sr  = await fetch(`${SERVER}/status`)
-    const sd  = await sr.json()
+    const resp = await fetch(`${SERVER}/status`)
+    const data = await resp.json()
 
-    trainerOnline = sd.trainer_online
+    document.getElementById("stat-workers").textContent = data.workers
+    document.getElementById("stat-batches").textContent = data.total_batches
+    document.getElementById("stat-vram").textContent    = data.total_vram_gb + " GB"
 
-    document.getElementById("stat-workers").textContent = sd.workers
-    document.getElementById("stat-batches").textContent = sd.total_batches
-    document.getElementById("stat-vram").textContent    = sd.total_vram_gb + " GB"
-    document.getElementById("stat-free").textContent    = sd.free_batch
+    const cpu = data.cpu || {}
+    const cpuEl = document.getElementById("stat-cpu")
+    if (cpu.server_cpu_pct !== undefined) {
+      cpuEl.textContent = cpu.server_cpu_pct.toFixed(0) + "%"
+      cpuEl.style.color = cpu.server_cpu_pct > 85 ? "#f87171" : "#7c6af7"
+    }
+    const banner = document.getElementById("bottleneck-banner")
+    banner.style.display = cpu.bottleneck ? "block" : "none"
+    if (cpu.bottleneck) document.getElementById("bottleneck-msg").textContent = cpu.bottleneck_reason
 
-    // offline banner
-    const banner = document.getElementById("offline-banner")
-    const notice = document.getElementById("offline-notice")
-    banner.style.display = trainerOnline ? "none" : "flex"
-    notice.style.display = trainerOnline ? "none" : "block"
+    // update server config cache + script card example
+    if (data.config) {
+      serverCfg = { max_vram_pct: data.config.max_vram_pct, bytes_per_sample: data.config.bytes_per_sample }
+      const ex8 = calcBatches(8, serverCfg.max_vram_pct, serverCfg.bytes_per_sample)
+      document.getElementById("vram-info-script").innerHTML =
+        `Formula: vram_gb × 1024³ × max_vram% ÷ bytes_per_sample<br>` +
+        `Example (8 GB, ${(serverCfg.max_vram_pct*100).toFixed(0)}%): ÷ ${serverCfg.bytes_per_sample} B = <span style="color:#fff">${ex8.toLocaleString()} batches</span>`
+    }
 
-    // workers list
     const list = document.getElementById("workers-list")
-    list.innerHTML = sd.workers_list.length === 0
-      ? '<div style="color:#333;font-size:.83rem;padding:14px 0">No contributors yet</div>'
-      : sd.workers_list.map(w => `
-          <div class="worker-row">
-            <span><span class="dot dot-green"></span><span class="worker-id">${w.id}</span></span>
-            <span class="worker-badge">${w.type}</span>
-            <span class="worker-badge">${w.vram}GB VRAM</span>
-            <span class="worker-badge">${w.batch}/${w.cap} batch</span>
-            <span class="worker-badge">${Math.floor(w.uptime/60)}m</span>
-          </div>`).join("")
-
-    // training feed
-    const tr  = await fetch(`${SERVER}/training_feed`)
-    const td  = await tr.json()
-    const s   = td.stats
-    const logs = td.log
-
-    // status pill
-    const pill = document.getElementById("status-pill")
-    const pillMap = {
-      training: ["Training", "pill-training"],
-      done:     ["Done",     "pill-done"],
-      offline:  ["Offline",  "pill-offline"],
-      idle:     ["Idle",     "pill-idle"],
-    }
-    const [label, cls] = pillMap[s.status] || ["Idle", "pill-idle"]
-    pill.textContent = label
-    pill.className   = "status-pill " + cls
-
-    const pct = s.total_epochs > 0 ? Math.round(s.epoch / s.total_epochs * 100) : 0
-    document.getElementById("prog-epoch").textContent   = `${s.epoch}/${s.total_epochs}`
-    document.getElementById("prog-loss").textContent    = s.loss || "—"
-    document.getElementById("prog-eta").textContent     = s.eta ? fmt(s.eta) : "—"
-    document.getElementById("prog-elapsed").textContent = s.elapsed ? fmt(s.elapsed) : "—"
-    document.getElementById("progress-fill").style.width = pct + "%"
-
-    if (logs && logs.length > 0) {
-      const logEl = document.getElementById("training-log")
-      logEl.innerHTML = logs.map(l =>
-        `<div class="log-line"><span class="log-time">${l.time}</span>${l.msg}</div>`
-      ).join("")
-      logEl.scrollTop = logEl.scrollHeight
+    if (!data.workers_list || !data.workers_list.length) {
+      list.innerHTML = '<div style="color:#333; font-size:0.85rem; padding:16px 0;">No contributors yet — be the first!</div>'
+    } else {
+      list.innerHTML = data.workers_list.map(w => {
+        const pct = w.cap > 0 ? Math.round(w.batch / w.cap * 100) : 0
+        return `<div class="worker-row">
+          <span><span class="dot-online"></span><span class="worker-id">${w.id}</span></span>
+          <span class="worker-badge">${w.vram} GB</span>
+          <span class="worker-badge ${pct >= 90 ? 'full' : ''}">${w.batch} / ${w.cap} batches (${pct}%)</span>
+          <span class="worker-badge">${Math.floor(w.uptime/60)}m</span>
+          <span class="worker-badge">${w.type}</span>
+          ${w.share_cpu ? `<span class="worker-badge cpu">CPU ${w.cpu_pct}%</span>` : ""}
+        </div>`
+      }).join("")
     }
 
+    if (adminKey) {
+      document.getElementById("admin-cpu-box").innerHTML =
+        `server_cpu: <span style="color:#a5b4fc">${cpu.server_cpu_pct?.toFixed(1) ?? "?"}%</span>   ` +
+        `pending_gradients: <span style="color:#a5b4fc">${cpu.pending_gradients ?? 0}</span>   ` +
+        `cpu_contributors: <span style="color:#a5b4fc">${(cpu.cpu_contributors||[]).length}</span>` +
+        (cpu.bottleneck ? `<br><span style="color:#f87171">⚠ ${cpu.bottleneck_reason}</span>` : "")
+    }
+  } catch(e) {
+    document.getElementById("stat-workers").textContent = "?"
+  }
+}
+
+async function adminLogin() {
+  const key = document.getElementById("admin-key").value.trim()
+  if (!key) return
+  try {
+    const r = await fetch(`${SERVER}/config`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-Secret-Key": key},
+      body: JSON.stringify({})
+    })
+    if (r.ok) {
+      adminKey = key
+      document.getElementById("admin-unlock").style.display = "none"
+      document.getElementById("admin-panel").style.display  = "block"
+      document.getElementById("admin-err").style.display    = "none"
+      loadAdminConfig()
+    } else {
+      document.getElementById("admin-err").style.display = "inline"
+    }
+  } catch(e) {
+    document.getElementById("admin-err").style.display = "inline"
+  }
+}
+
+function adminLogout() {
+  adminKey = null
+  document.getElementById("admin-panel").style.display  = "none"
+  document.getElementById("admin-unlock").style.display = "flex"
+  document.getElementById("admin-key").value = ""
+}
+
+async function loadAdminConfig() {
+  try {
+    const d = await (await fetch(`${SERVER}/config`)).json()
+    document.getElementById("cfg-total-batch").value      = d.total_batch
+    document.getElementById("cfg-max-vram").value         = d.max_vram_pct
+    document.getElementById("cfg-bytes-per-sample").value = d.bytes_per_sample
+    document.getElementById("cfg-min-batch").value        = d.min_batch
   } catch(e) {}
 }
 
-setInterval(updateStats, 3000)
+async function adminSave() {
+  if (!adminKey) return
+  const r = await fetch(`${SERVER}/config`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-Secret-Key": adminKey},
+    body: JSON.stringify({
+      total_batch:      parseInt(document.getElementById("cfg-total-batch").value),
+      max_vram_pct:     parseFloat(document.getElementById("cfg-max-vram").value),
+      bytes_per_sample: parseInt(document.getElementById("cfg-bytes-per-sample").value),
+      min_batch:        parseInt(document.getElementById("cfg-min-batch").value),
+    })
+  })
+  if (r.ok) {
+    const el = document.getElementById("admin-saved")
+    el.style.display = "inline"
+    setTimeout(() => el.style.display = "none", 3000)
+  }
+}
+
+setInterval(updateStats, 5000)
 updateStats()
 </script>
 </body>
