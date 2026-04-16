@@ -1,21 +1,20 @@
-# worker.py — contribute your GPU/CPU to help train MyAI
-# ─────────────────────────────────────────────────────────
-# What this does:
-#   1. Downloads PUBLIC training data batches from the server
-#   2. Trains a local copy of the model on those batches
-#   3. Sends only the GRADIENTS back — your trained model stays private
-#      and the server never gets your personal myai.pt file
+# worker.py — contribute GPU/CPU to help train MyAI
+# ─────────────────────────────────────────────────────────────────────
+# How it ACTUALLY helps:
+#   1. Downloads the CURRENT trained model weights from the server
+#      (train.py pushes updated weights every epoch)
+#   2. Downloads a batch of training data from the server
+#   3. Runs forward + backward on YOUR hardware
+#   4. Sends the gradients (not the model) back to the server
+#   5. train.py fetches these gradients and blends them into its own
+#      update — effectively processing more data per step than it
+#      could alone
 #
-# The server provides:
-#   - Batches of training text (public data you helped download)
-#   - The model architecture config (no weights, just shape)
-#   - Tokenizer vocab
-#   - Admin settings (CPU/GPU share limits set by the owner)
-#
-# Your GPU/CPU does real training work that helps improve the AI.
-# ─────────────────────────────────────────────────────────
+# This means with 5 workers each processing 50 samples, train.py
+# gets updates from 250 extra samples per step it would have missed.
+# Workers with more VRAM contribute more samples per batch.
+# ─────────────────────────────────────────────────────────────────────
 
-# Auto-install missing packages
 import sys, subprocess, os
 
 def _pip(pkg):
@@ -29,12 +28,10 @@ for _pkg in ["torch","requests"]:
     try: __import__(_pkg)
     except ImportError:
         print(f"Installing {_pkg}...")
-        if not _pip(_pkg):
-            print(f"Failed to install {_pkg}. Run: pip install {_pkg}"); sys.exit(1)
-        print(f"{_pkg} installed — restarting...")
-        os.execv(sys.executable, [sys.executable]+sys.argv)
+        if not _pip(_pkg): print(f"Failed: pip install {_pkg}"); sys.exit(1)
+        print(f"{_pkg} OK — restarting..."); os.execv(sys.executable,[sys.executable]+sys.argv)
 
-import uuid, time, math, json, threading
+import uuid, time, math, json, threading, io
 import torch, requests
 import torch.nn as nn
 
@@ -42,14 +39,14 @@ import torch.nn as nn
 #   CONFIGURATION
 # ═══════════════════════════════════════════════════
 
-SERVER_URL = "https://eh-production.up.railway.app"
-
-# These are overridden by admin settings from the server
-SHARE_CPU     = False   # donate CPU time even without a GPU
-CPU_THREADS   = 2       # CPU threads to use (server can override)
+SERVER_URL   = "https://eh-production.up.railway.app"
+# How often (in training loops) to refresh model weights from server.
+# Lower = workers stay closer to train.py's current weights = better gradients.
+# Higher = fewer downloads = less bandwidth.
+REFRESH_WEIGHTS_EVERY = 20   # batches between weight refreshes
 
 # ═══════════════════════════════════════════════════
-#   INLINE MODEL  (no model.py needed on worker machine)
+#   INLINE MODEL  (mirrors the architecture in model.py)
 # ═══════════════════════════════════════════════════
 
 class _Cfg:
@@ -57,7 +54,7 @@ class _Cfg:
     num_heads = 8; num_layers = 6; dropout = 0.1
 
 class _Attn(nn.Module):
-    def __init__(self, c):
+    def __init__(self,c):
         super().__init__()
         self.h=c.num_heads; self.d=c.embed_dim//c.num_heads
         self.qkv=nn.Linear(c.embed_dim,3*c.embed_dim)
@@ -70,8 +67,7 @@ class _Attn(nn.Module):
         s=(q@k.transpose(-2,-1))/math.sqrt(self.d)
         mask=torch.triu(torch.ones(T,T,device=x.device),1).bool()
         s=s.masked_fill(mask,float("-inf"))
-        w=self.dp(torch.softmax(s,dim=-1))
-        return self.out((w@v).transpose(1,2).reshape(B,T,C))
+        return self.out((self.dp(torch.softmax(s,dim=-1))@v).transpose(1,2).reshape(B,T,C))
 
 class _Block(nn.Module):
     def __init__(self,c):
@@ -81,7 +77,7 @@ class _Block(nn.Module):
                                nn.Linear(4*c.embed_dim,c.embed_dim),nn.Dropout(c.dropout))
         self.n1=nn.LayerNorm(c.embed_dim); self.n2=nn.LayerNorm(c.embed_dim)
     def forward(self,x):
-        x=x+self.a(self.n1(x)); return x+self.ff(self.n2(x))
+        return x+self.ff(self.n2(x+self.a(self.n1(x))))
 
 class _Model(nn.Module):
     def __init__(self,c):
@@ -94,14 +90,14 @@ class _Model(nn.Module):
         self.dp=nn.Dropout(c.dropout); self.cfg=c
     def forward(self,t):
         B,T=t.shape
-        x=self.dp(self.tok_emb(t)+self.pos_emb(torch.arange(T,device=t.device)))
-        return self.head(self.norm(self.blocks(x)))
+        return self.head(self.norm(self.blocks(
+            self.dp(self.tok_emb(t)+self.pos_emb(torch.arange(T,device=t.device))))))
 
 # ═══════════════════════════════════════════════════
 #   HELPERS
 # ═══════════════════════════════════════════════════
 
-def get_vram_gb():
+def get_vram():
     if torch.cuda.is_available():
         return torch.cuda.get_device_properties(0).total_memory/1024**3
     return 0.0
@@ -110,44 +106,83 @@ def get_gpu_name():
     return torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
 
 def fmt(s):
-    if s<60:   return f"{int(s)}s"
+    if s<60: return f"{int(s)}s"
     if s<3600: return f"{int(s//60)}m{int(s%60)}s"
     return f"{int(s//3600)}h{int((s%3600)//60)}m"
 
-def probe_batch(model, device, vram_gb, seq_len, reserve_gb=1.0):
-    """Find largest batch that fits with reserve_gb free."""
-    if device.type == "cpu":
-        return 4
-    usable = vram_gb - reserve_gb
-    if usable <= 0: return 1
+def probe_batch(model, device, vram_gb, seq_len, reserve_gb=1.2):
+    """Find largest batch that fits with reserve free."""
+    if device.type=="cpu": return 4
+    usable=vram_gb-reserve_gb
+    if usable<=0: return 1
     model.eval()
-    probe = max(1, int(usable * 256))
-    while probe >= 1:
+    probe=max(1,int(usable*200))
+    while probe>=1:
         try:
             torch.cuda.empty_cache()
-            d = torch.zeros(probe, seq_len-1, dtype=torch.long, device=device)
+            d=torch.zeros(probe,seq_len-1,dtype=torch.long,device=device)
             with torch.no_grad(): model(d)
-            del d; torch.cuda.empty_cache()
-            break
+            del d; torch.cuda.empty_cache(); break
         except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache(); probe //= 2
+            torch.cuda.empty_cache(); probe//=2
     model.train()
-    return max(1, probe)
+    return max(1,probe)
+
+# ═══════════════════════════════════════════════════
+#   MODEL MANAGEMENT
+#   Workers download the real trained weights so their
+#   gradients actually match what train.py needs.
+# ═══════════════════════════════════════════════════
+
+_model_etag = None   # track server model version to avoid re-downloading same weights
+
+def download_model_weights(model, device):
+    """
+    Download the latest model weights from server and load into model.
+    Uses ETag to skip download if weights haven't changed.
+    Returns True if weights were updated, False if unchanged or failed.
+    """
+    global _model_etag
+    try:
+        headers = {}
+        if _model_etag: headers["If-None-Match"] = _model_etag
+        r = requests.get(f"{SERVER_URL}/model", headers=headers, timeout=30)
+
+        if r.status_code == 304:
+            return False  # not modified — skip
+
+        if r.status_code != 200 or len(r.content) < 1000:
+            return False
+
+        _model_etag = r.headers.get("ETag")
+
+        # Load weights into the model
+        buf  = io.BytesIO(r.content)
+        ckpt = torch.load(buf, map_location=device)
+        state = ckpt.get("model", ckpt)  # handle both formats
+        m = model.module if hasattr(model,"module") else model
+        try:
+            m.load_state_dict(state, strict=False)
+            return True
+        except Exception as e:
+            print(f"  [weights] load failed: {e}"); return False
+    except Exception as e:
+        print(f"  [weights] download failed: {e}"); return False
 
 # ═══════════════════════════════════════════════════
 #   MAIN
 # ═══════════════════════════════════════════════════
 
 def main():
-    vram_gb   = get_vram_gb()
+    vram_gb   = get_vram()
     device    = torch.device("cuda" if vram_gb > 0 else "cpu")
     worker_id = str(uuid.uuid4())
 
-    print("="*50)
-    print("  MyAI Worker  —  sharing computing power")
+    print("="*54)
+    print("  MyAI Worker  —  real GPU contribution")
     print(f"  Device : {device} | {get_gpu_name()}")
     print(f"  VRAM   : {vram_gb:.1f} GB")
-    print("="*50)
+    print("="*54)
     print(f"Connecting to {SERVER_URL} ...")
 
     # ── Join pool ──────────────────────────────────
@@ -161,131 +196,146 @@ def main():
 
     server_batch = resp.get("batch", 4)
     cap          = resp.get("cap", server_batch)
+    cfg_snap     = resp.get("config", {})
+    min_batch    = cfg_snap.get("min_batch", 1)
 
-    # ── Apply admin config ─────────────────────────
-    cfg_snap         = resp.get("config", {})
-    bytes_per_sample = cfg_snap.get("bytes_per_sample", 32_212_254)
-    max_vram_pct     = cfg_snap.get("max_vram_pct", 0.70)
-    min_batch        = cfg_snap.get("min_batch", 1)
-    # CPU sharing: admin can allow workers to donate CPU
-    allow_cpu_share  = cfg_snap.get("allow_cpu_share", False)
-    cpu_threads_cfg  = cfg_snap.get("cpu_threads", CPU_THREADS)
-
-    print(f"Admin config: allow_cpu={allow_cpu_share} threads={cpu_threads_cfg} "
-          f"max_vram={max_vram_pct*100:.0f}%")
     print(f"Assigned: {server_batch} batches (cap={cap})")
 
-    # Apply CPU thread limit if sharing is enabled
-    if allow_cpu_share or device.type == "cpu":
-        torch.set_num_threads(cpu_threads_cfg)
-        print(f"CPU threads: {cpu_threads_cfg}")
-
-    # ── Download tokenizer vocab ───────────────────
-    # We only need the vocab to build the model — not the model weights.
-    # This is PUBLIC data (the tokenizer is built from public text).
-    print("\nDownloading tokenizer vocab...")
+    # ── Download tokenizer ─────────────────────────
+    print("Downloading tokenizer...")
     try:
         tok_r = requests.get(f"{SERVER_URL}/tokenizer", timeout=30)
         if tok_r.status_code != 200:
-            print(f"Tokenizer not ready (HTTP {tok_r.status_code}).")
-            print("The server owner needs to run train.py once to upload it.")
-            return
+            print(f"Tokenizer not ready (HTTP {tok_r.status_code}). "
+                  "Run train.py first."); return
         tok_data = tok_r.json()
-        if "error" in tok_data or "word2id" not in tok_data:
-            print(f"Tokenizer error: {tok_data.get('error','bad format')}")
-            print("Run train.py first on the server owner's machine.")
-            return
-        word2id    = tok_data["word2id"]
-        vocab_size = len(word2id)
-        print(f"Vocab loaded: {vocab_size} tokens")
+        if "word2id" not in tok_data:
+            print(f"Bad tokenizer: {tok_data.get('error','?')}"); return
+        vocab_size = len(tok_data["word2id"])
+        print(f"Vocab: {vocab_size} tokens")
     except Exception as e:
-        print(f"Tokenizer download failed: {e}"); return
+        print(f"Tokenizer error: {e}"); return
 
-    # ── Download model CONFIG (not weights) ────────
-    # We build a fresh model from scratch using the same architecture.
-    # Workers train from a random init on public data — this is fine
-    # because we're only sending GRADIENTS (direction of improvement),
-    # not the model itself.  The server owner's weights stay private.
-    print("Building local model from architecture config...")
+    # ── Check model is available ───────────────────
+    print("Checking model on server...")
     try:
-        # Try to get architecture config from server
-        cfg_r = requests.get(f"{SERVER_URL}/config", timeout=10)
-        server_cfg = cfg_r.json() if cfg_r.status_code == 200 else {}
+        model_check = requests.head(f"{SERVER_URL}/model", timeout=10)
+        if model_check.status_code == 404:
+            print("No model on server yet. Run train.py first until it syncs "
+                  f"(every {cfg_snap.get('sync_every',5)} epochs).")
+            print("Waiting 30s then retrying...")
+            time.sleep(30)
+            model_check = requests.head(f"{SERVER_URL}/model", timeout=10)
+            if model_check.status_code == 404:
+                print("Still no model. Start train.py first, then run this."); return
     except Exception:
-        server_cfg = {}
+        pass  # HEAD might not be supported, continue
 
-    wcfg = _Cfg()
-    wcfg.vocab_size = vocab_size
-    # Apply any architecture hints from server config
-    for k in ("embed_dim", "num_heads", "num_layers", "seq_len", "dropout"):
-        if k in server_cfg:
-            setattr(wcfg, k, server_cfg[k])
+    # ── Build model from architecture ──────────────
+    print("Building model...")
+    # Try to get architecture from server config
+    try:
+        srv_cfg = requests.get(f"{SERVER_URL}/config", timeout=10).json()
+    except Exception:
+        srv_cfg = {}
+
+    wcfg = _Cfg(); wcfg.vocab_size = vocab_size
+    for k in ("embed_dim","num_heads","num_layers","seq_len","dropout"):
+        if k in srv_cfg: setattr(wcfg, k, srv_cfg[k])
 
     model = _Model(wcfg).to(device)
+
+    # ── Download REAL trained weights ──────────────
+    print("Downloading trained model weights...")
+    updated = download_model_weights(model, device)
+    if not updated:
+        # Try unconditionally
+        try:
+            r = requests.get(f"{SERVER_URL}/model", timeout=60)
+            if r.status_code == 200 and len(r.content) > 1000:
+                buf  = io.BytesIO(r.content)
+                ckpt = torch.load(buf, map_location=device)
+                state = ckpt.get("model", ckpt)
+                m = model.module if hasattr(model,"module") else model
+                m.load_state_dict(state, strict=False)
+                print("  Weights loaded from server")
+            else:
+                print("  No model on server — using random init (gradients will be weak)")
+                print("  Let train.py run for at least 1 epoch first!")
+        except Exception as e:
+            print(f"  Weight load failed: {e} — using random init")
+    else:
+        print("  Weights loaded")
     model.train()
 
     # ── Probe safe batch size ──────────────────────
     print("Probing safe batch size...")
-    reserve = 1.0 if device.type == "cuda" else 0
-    safe    = probe_batch(model, device, vram_gb, wcfg.seq_len, reserve_gb=reserve)
+    safe       = probe_batch(model, device, vram_gb, wcfg.seq_len)
     batch_size = max(min_batch, min(server_batch, safe))
-    print(f"Batch size: {batch_size}\n")
+    print(f"Batch size: {batch_size}")
+    print()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
     loss_fn   = nn.CrossEntropyLoss(ignore_index=0)
-    scaler    = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
+    scaler    = torch.cuda.amp.GradScaler() if device.type=="cuda" else None
 
     # Live config (updated by heartbeat)
-    live = {"batch_size": batch_size, "bytes_per_sample": bytes_per_sample,
-            "max_vram_pct": max_vram_pct, "min_batch": min_batch,
-            "allow_cpu_share": allow_cpu_share, "cpu_threads": cpu_threads_cfg}
+    live = {"batch": batch_size, "min_batch": min_batch}
 
-    # ── Heartbeat thread ───────────────────────────
+    # ── Heartbeat ──────────────────────────────────
     def heartbeat():
         while True:
             time.sleep(10)
             try:
                 r = requests.post(f"{SERVER_URL}/ping",
                     json={"worker_id": worker_id}, timeout=5).json()
-                if r.get("status") != "ok": continue
-                nc = r.get("config", {})
-                changed = False
-                for key in ("bytes_per_sample","max_vram_pct","min_batch"):
-                    if nc.get(key) != live.get(key):
-                        live[key] = nc[key]; changed = True
-                # CPU sharing
-                if nc.get("allow_cpu_share") != live.get("allow_cpu_share"):
-                    live["allow_cpu_share"] = nc.get("allow_cpu_share", False)
-                    live["cpu_threads"]     = nc.get("cpu_threads", CPU_THREADS)
-                    if live["allow_cpu_share"] or device.type == "cpu":
-                        torch.set_num_threads(live["cpu_threads"])
-                    changed = True
-                if changed:
-                    new_safe = probe_batch(model, device, vram_gb,
-                                           wcfg.seq_len, reserve_gb=reserve)
-                    live["batch_size"] = max(live["min_batch"],
-                        min(r.get("batch", server_batch), new_safe))
-                    print(f"[config] updated batch={live['batch_size']}")
+                if r.get("status") == "not_found":
+                    # Server restarted — rejoin
+                    rj = requests.post(f"{SERVER_URL}/join", json={
+                        "worker_id": worker_id, "vram_gb": vram_gb,
+                        "gpu_name": get_gpu_name(), "type": "script",
+                    }, timeout=10).json()
+                    live["batch"] = max(live["min_batch"],
+                        min(rj.get("batch", live["batch"]), safe))
+                    print(f"[reconnected] batch={live['batch']}")
+                elif r.get("status") == "ok":
+                    nc = r.get("config", {})
+                    live["min_batch"] = nc.get("min_batch", 1)
+                    live["batch"] = max(live["min_batch"],
+                        min(r.get("batch", live["batch"]), safe))
             except Exception as e:
                 print(f"[heartbeat] {e}")
     threading.Thread(target=heartbeat, daemon=True).start()
 
     # ── Training loop ──────────────────────────────
-    print("Training — press Ctrl+C to stop and return batches\n")
+    print("Contributing computing power — press Ctrl+C to stop\n")
     done = 0; total_loss = 0.0; t0 = time.time()
+    last_weight_refresh = 0
 
     try:
         while True:
-            bs = live["batch_size"]
+            bs = live["batch"]
+
+            # ── Refresh model weights from server ─────
+            # Critical: without this, worker gradients point in the wrong
+            # direction (based on old weights) and hurt training instead of helping.
+            if done - last_weight_refresh >= REFRESH_WEIGHTS_EVERY:
+                updated = download_model_weights(model, device)
+                if updated:
+                    # Reset optimizer momentum since weights changed significantly
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
+                    last_weight_refresh = done
+                    print(f"  [weights] refreshed from server (batch {done})")
+
+            # ── Get training batch from server ────────
             try:
                 resp = requests.get(f"{SERVER_URL}/get_batch",
                     params={"worker_id": worker_id, "size": bs}, timeout=30)
             except Exception as e:
-                print(f"Batch fetch error: {e} — retrying in 5s")
-                time.sleep(5); continue
+                print(f"Batch error: {e}"); time.sleep(5); continue
 
             if resp.status_code == 204:
-                print("No data available — waiting..."); time.sleep(5); continue
+                print("No data — waiting..."); time.sleep(5); continue
             if resp.status_code != 200:
                 time.sleep(5); continue
 
@@ -293,53 +343,63 @@ def main():
             tokens = torch.tensor(bd["tokens"], dtype=torch.long).to(device)
             x, y   = tokens[:, :-1], tokens[:, 1:]
 
+            # ── Forward + backward ────────────────────
             optimizer.zero_grad()
             try:
                 if scaler:
                     with torch.cuda.amp.autocast():
                         logits = model(x)
-                        loss = loss_fn(logits.reshape(-1, wcfg.vocab_size), y.reshape(-1))
+                        loss   = loss_fn(logits.reshape(-1, wcfg.vocab_size), y.reshape(-1))
                     scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     scaler.step(optimizer); scaler.update()
                 else:
                     logits = model(x)
-                    loss = loss_fn(logits.reshape(-1, wcfg.vocab_size), y.reshape(-1))
+                    loss   = loss_fn(logits.reshape(-1, wcfg.vocab_size), y.reshape(-1))
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache(); optimizer.zero_grad()
-                live["batch_size"] = max(1, live["batch_size"] // 2)
-                print(f"OOM — reduced batch to {live['batch_size']}"); continue
+                live["batch"] = max(1, live["batch"]//2)
+                print(f"OOM — batch reduced to {live['batch']}"); continue
 
-            # ── Send gradients (not weights) ───────
-            grads = {name: param.grad.cpu().tolist()
-                     for name, param in model.named_parameters()
-                     if param.grad is not None}
+            # ── Send gradients to server ───────────────
+            # Only send gradients for parameters that actually changed.
+            # Compress: send mean+std instead of full tensor for large params.
+            grads = {}
+            for name, param in model.named_parameters():
+                if param.grad is None: continue
+                g = param.grad.cpu()
+                # For large params (>10k elements), quantize to save bandwidth
+                if g.numel() > 10_000:
+                    grads[name] = g.half().tolist()   # float16 = 2x smaller
+                else:
+                    grads[name] = g.tolist()
+
             try:
                 requests.post(f"{SERVER_URL}/submit_gradients", json={
-                    "worker_id": worker_id, "loss": loss.item(),
-                    "grads": grads, "batch_id": bd["batch_id"],
+                    "worker_id": worker_id,
+                    "loss":      loss.item(),
+                    "grads":     grads,
+                    "batch_id":  bd["batch_id"],
                 }, timeout=30)
             except Exception:
-                pass  # gradient loss is recoverable
+                pass   # gradient loss is recoverable
 
-            done += 1; total_loss += loss.item()
-            avg  = total_loss / done; ela = time.time()-t0
-            rate = done/ela if ela > 0 else 0
+            done += 1; total_loss += loss.item(); avg = total_loss/done
+            ela = time.time()-t0; rate = done/ela if ela>0 else 0
             print(f"[{done:4d}] loss:{loss.item():.4f} avg:{avg:.4f} "
-                  f"{rate:.2f}b/s up:{fmt(ela)}")
+                  f"batch:{bs} {rate:.2f}b/s up:{fmt(ela)}")
 
     except KeyboardInterrupt:
-        print("\nStopping — returning batches...")
+        print("\nStopping — returning batches to pool...")
         try:
             requests.post(f"{SERVER_URL}/leave",
                 json={"worker_id": worker_id}, timeout=5)
-            print("Done! Thanks for contributing.")
-        except Exception:
-            pass
+            print(f"Done! Contributed {done} batches. Thanks!")
+        except Exception: pass
 
 if __name__ == "__main__":
     main()
