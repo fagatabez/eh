@@ -124,8 +124,15 @@ def rebalance_workers():
 
 def recalc_caps():
     for w in workers.values():
+        # Use the real VRAM the worker reported, capped at what the formula gives.
+        # This prevents a browser worker that reported 2 GB getting a huge cap
+        # when it actually only has 500 MB of usable WebGL memory.
         usable = w["vram"] * (1024**3) * MAX_VRAM_PCT
-        w["cap"] = max(MIN_BATCH, int(usable // BYTES_PER_SAMPLE))
+        raw_cap = max(MIN_BATCH, int(usable // BYTES_PER_SAMPLE))
+        # For web workers, trust the cap they send (set during /join from probe),
+        # otherwise use formula. Whichever is lower wins (safety first).
+        reported_cap = w.get("reported_cap", raw_cap)
+        w["cap"] = max(MIN_BATCH, min(raw_cap, reported_cap))
     rebalance_workers()
 
 def cleanup_dead_workers():
@@ -160,18 +167,21 @@ def join():
 
     usable_bytes = vram_gb * (1024**3) * MAX_VRAM_PCT
     cap = max(MIN_BATCH, int(usable_bytes // BYTES_PER_SAMPLE)) if vram_gb > 0 else MIN_BATCH
+    # Web workers send their probed cap directly so we don't over-allocate
+    reported_cap = int(data.get("probed_cap", cap))
 
     with lock:
         # Reconnect: restore previous batch allocation if session existed
         prev = _load_sessions().get(worker_id)
         workers[worker_id] = {
-            "batch":     prev["batch"] if prev else 0,
-            "cap":       cap,
-            "vram":      vram_gb,
-            "gpu":       gpu_name,
-            "type":      wtype,
-            "joined":    time.time(),
-            "last_seen": time.time(),
+            "batch":        prev["batch"] if prev else 0,
+            "cap":          min(cap, reported_cap),
+            "reported_cap": reported_cap,
+            "vram":         vram_gb,
+            "gpu":          gpu_name,
+            "type":         wtype,
+            "joined":       time.time(),
+            "last_seen":    time.time(),
         }
         rebalance_workers()
         assigned = workers[worker_id]["batch"]
@@ -211,6 +221,16 @@ def leave():
 
 @app.route("/status", methods=["GET"])
 def status():
+    try:
+        import psutil
+        cpu_pct = psutil.cpu_percent(interval=None)
+    except Exception:
+        cpu_pct = 0.0
+
+    pending_grads = 0
+    with gradient_lock:
+        pending_grads = len(gradient_buffer.get("losses", []))
+
     with lock:
         return jsonify({
             "workers":        len(workers),
@@ -220,6 +240,13 @@ def status():
             "pool_size":      TOTAL_BATCH,
             "trainer_online": is_trainer_online(),
             "config":         config_snapshot(),
+            "cpu": {
+                "server_cpu_pct":  round(cpu_pct, 1),
+                "pending_gradients": pending_grads,
+                "cpu_contributors": [],
+                "bottleneck": cpu_pct > 90,
+                "bottleneck_reason": "Server CPU over 90% — gradient processing slowed" if cpu_pct > 90 else "",
+            },
             "workers_list": [
                 {"id": wid[:8], "batch": w["batch"], "cap": w["cap"],
                  "vram": w["vram"], "gpu": w["gpu"], "type": w["type"],
