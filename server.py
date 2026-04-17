@@ -294,20 +294,88 @@ def upload_tokenizer():
     print("Tokenizer updated")
     return jsonify({"status":"ok"})
 
+@app.route("/has_training_data", methods=["GET"])
+def has_training_data():
+    ok = os.path.exists("training_data.txt.gz")
+    return jsonify({"ok": ok})
+
+# ── Cached tokenizer word2id for get_batch ────────
+_tok_cache = {}
+
+def _get_tok():
+    global _tok_cache
+    if _tok_cache:
+        return _tok_cache
+    if os.path.exists("tokenizer.json"):
+        try:
+            with open("tokenizer.json") as f:
+                data = json.load(f)
+            _tok_cache = data.get("word2id", {})
+        except Exception:
+            pass
+    return _tok_cache
+
+def _tok_encode(text, word2id, seq_len=128):
+    """Tokenize a string using the real word2id vocab."""
+    import re as _re
+    UNK = word2id.get("<unk>", 1)
+    BOS = word2id.get("<bos>", 2)
+    EOS = word2id.get("<eos>", 3)
+    tokens = _re.findall(r"\w+|[^\w\s]", text.lower())
+    ids = [BOS] + [word2id.get(t, UNK) for t in tokens] + [EOS]
+    # chunk into seq_len+1 slices
+    chunks = []
+    for i in range(0, len(ids) - seq_len, seq_len // 2):
+        chunk = ids[i:i + seq_len + 1]
+        if len(chunk) == seq_len + 1:
+            chunks.append(chunk)
+    return chunks
+
 @app.route("/get_batch", methods=["GET"])
 def get_batch():
-    if not os.path.exists("training_data.txt.gz"): return "", 204
-    with gzip.open("training_data.txt.gz","rt",encoding="utf-8") as f: text = f.read()
-    size  = int(request.args.get("size", 32))
-    start = random.randint(0, max(0, len(text)-size*200))
-    chunk = text[start:start+size*200]
-    tokens = []
-    for i in range(0, min(len(chunk), size*128), 128):
-        row = [ord(c) % 30000 for c in chunk[i:i+128]]
-        if len(row) == 128: tokens.append(row)
-    tokens = tokens[:size]
-    if not tokens: return "", 204
-    return jsonify({"batch_id": str(random.randint(0,999999)), "tokens": tokens})
+    if not os.path.exists("training_data.txt.gz"):
+        return "", 204
+    size     = int(request.args.get("size", 32))
+    seq_len  = 128
+    word2id  = _get_tok()
+
+    # Reload tokenizer if it changed on disk (tokenizer.json updated)
+    global _tok_cache
+    try:
+        mtime = os.path.getmtime("tokenizer.json")
+        if not hasattr(get_batch, "_tok_mtime") or get_batch._tok_mtime != mtime:
+            get_batch._tok_mtime = mtime
+            _tok_cache = {}
+            word2id = _get_tok()
+    except Exception:
+        pass
+
+    try:
+        with gzip.open("training_data.txt.gz", "rt", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return "", 204
+
+    # Pick a random chunk of text large enough to yield `size` sequences
+    chunk_chars = size * seq_len * 6   # rough estimate: ~6 chars per token
+    start = random.randint(0, max(0, len(text) - chunk_chars))
+    chunk = text[start : start + chunk_chars]
+
+    if word2id:
+        # Use the real tokenizer
+        all_chunks = _tok_encode(chunk, word2id, seq_len)
+    else:
+        # Fallback if tokenizer not available yet: character ordinals mod vocab
+        all_chunks = []
+        for i in range(0, min(len(chunk), size * seq_len), seq_len):
+            row = [ord(c) % 5000 for c in chunk[i:i + seq_len + 1]]
+            if len(row) == seq_len + 1:
+                all_chunks.append(row)
+
+    tokens = all_chunks[:size]
+    if not tokens:
+        return "", 204
+    return jsonify({"batch_id": str(random.randint(0, 999999)), "tokens": tokens})
 
 @app.route("/training_data", methods=["POST"])
 def upload_training_data():
