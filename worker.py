@@ -299,26 +299,104 @@ def main():
     except Exception as e:
         print(f"Tokenizer error: {e}"); return
 
-    # ── Check model is available ───────────────────
+    # ── Check model is available — if not, go to CPU overflow mode ────────────
     print("Checking model on server...")
+    _model_available = True
     try:
         model_check = requests.head(f"{SERVER_URL}/model", timeout=10)
         if model_check.status_code == 404:
-            print("No model on server yet. Run train.py first until it syncs "
-                  f"(every {cfg_snap.get('sync_every',5)} epochs).")
-            print("Waiting 30s then retrying...")
-            time.sleep(30)
-            model_check = requests.head(f"{SERVER_URL}/model", timeout=10)
-            if model_check.status_code == 404:
-                print("Still no model. Start train.py first, then run this."); return
+            print("\n  ⚠ No trained model on server yet.")
+            print("  train.py hasn't pushed weights yet (needs at least 1 epoch).")
+            print("  Switching to CPU overflow mode — will train on surplus batches")
+            print("  that train.py spills to the server while its GPU is ahead of the CPU.")
+            print("  This directly helps YOUR AI without needing a local model download.\n")
+            _model_available = False
     except Exception:
-        pass  # HEAD might not be supported, continue
+        pass
 
-    # ── Build model from architecture ──────────────
-    # Always read architecture from the server checkpoint first.
-    # This guarantees the worker matches train.py exactly, regardless
-    # of what _Cfg defaults say.
-    print("Building model...")
+    # ── If no model on server yet — run CPU overflow loop ─────────────────────
+    if not _model_available:
+        print("="*54)
+        print("  CPU Overflow Mode")
+        print("  Training on surplus batches from train.py's server queue.")
+        print("  Your gradients are submitted back normally.")
+        print("  When train.py pushes its first model, restart worker.py")
+        print("  to switch to full GPU gradient mode.")
+        print("="*54 + "\n")
+
+        # Build a minimal model with default architecture for overflow training
+        wcfg_ov = _Cfg()
+        try:
+            srv_cfg_ov = requests.get(f"{SERVER_URL}/config", timeout=10).json()
+            for k in ("embed_dim","num_heads","num_layers","seq_len","dropout","vocab_size"):
+                if k in srv_cfg_ov: setattr(wcfg_ov, k, srv_cfg_ov[k])
+        except Exception:
+            pass
+        wcfg_ov.vocab_size = vocab_size
+
+        ov_model     = _Model(wcfg_ov).to(torch.device("cpu"))
+        ov_optimizer = torch.optim.AdamW(ov_model.parameters(), lr=3e-4, weight_decay=0.01)
+        ov_loss_fn   = nn.CrossEntropyLoss(ignore_index=0)
+        ov_model.train()
+        done_ov = 0; t0_ov = time.time()
+
+        try:
+            while True:
+                # Poll overflow queue
+                try:
+                    ov_resp = requests.get(f"{SERVER_URL}/overflow_batch", timeout=10)
+                except Exception as e:
+                    print(f"  [overflow] fetch error: {e}"); time.sleep(5); continue
+
+                if ov_resp.status_code == 204:
+                    print("  [overflow] Queue empty — waiting for train.py to fill it..."); time.sleep(5); continue
+                if ov_resp.status_code != 200:
+                    time.sleep(3); continue
+
+                # Check if main model appeared — if so, prompt restart
+                try:
+                    chk = requests.head(f"{SERVER_URL}/model", timeout=5)
+                    if chk.status_code == 200:
+                        print("\n  ✓ train.py has now pushed a model!")
+                        print("  Restart worker.py to switch to full GPU gradient mode.")
+                        break
+                except Exception:
+                    pass
+
+                bd_ov  = ov_resp.json()
+                tokens_ov = torch.tensor(bd_ov["tokens"], dtype=torch.long)
+                x_ov, y_ov = tokens_ov[:, :-1], tokens_ov[:, 1:]
+
+                ov_optimizer.zero_grad()
+                logits_ov = ov_model(x_ov)
+                loss_ov   = ov_loss_fn(logits_ov.reshape(-1, wcfg_ov.vocab_size), y_ov.reshape(-1))
+                loss_ov.backward()
+                torch.nn.utils.clip_grad_norm_(ov_model.parameters(), 1.0)
+                ov_optimizer.step()
+
+                grads_ov = {}
+                for name, param in ov_model.named_parameters():
+                    if param.grad is None: continue
+                    g = param.grad.cpu()
+                    grads_ov[name] = g.half().tolist() if g.numel() > 10_000 else g.tolist()
+
+                try:
+                    requests.post(f"{SERVER_URL}/submit_gradients", json={
+                        "worker_id": worker_id,
+                        "loss":      loss_ov.item(),
+                        "grads":     grads_ov,
+                        "batch_id":  "overflow",
+                    }, timeout=10)
+                except Exception:
+                    pass
+
+                done_ov += 1
+                ela_ov = time.time()-t0_ov
+                print(f"  [overflow {done_ov:4d}] loss:{loss_ov.item():.4f}  up:{fmt(ela_ov)}  "
+                      f"→ gradients submitted to your AI")
+        except KeyboardInterrupt:
+            print(f"\n  Stopped. Processed {done_ov} overflow batches.")
+        return   # exit main() — don't fall through to GPU loop
 
     wcfg = _Cfg(); wcfg.vocab_size = vocab_size
 

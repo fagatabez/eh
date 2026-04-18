@@ -41,20 +41,28 @@ FILES_TO_SAVE = [
     'chat.py',
     'download_data.py',
     'kaggle_setup.py',
-    # ── State / settings ──────────────────────────
+    # ── State / settings (dot versions) ───────────
     '.training_budget.json',
     '.autoscale.json',
     '.best_loss',
     '.data_hash',
     '.training_complete.json',
+    '.phase_state.json',     # ← phase progress — critical for resume
+    # ── State / settings (plain versions) ─────────
+    'training_budget.json',
+    'autoscale.json',
+    'best_loss',
+    'data_hash',
+    'training_complete.json',
+    'phase_state.json',
 ]
 
-# Also push any myai_epoch*.pt checkpoints found in /kaggle/working
+# Also push any myai_epoch*.pt and myai_phase*.pt checkpoints found
 PUSH_EPOCH_CKPTS = True
+PUSH_PHASE_CKPTS = True
 
 # Push training data to GitHub?
 # Usually too large (GitHub limit = 100 MB per file).
-# Set True only if your training_data.txt.gz is under ~90 MB.
 PUSH_TRAINING_DATA  = False
 TRAINING_DATA_FILES = ['training_data.txt.gz', 'training_data.txt']
 
@@ -70,16 +78,26 @@ OPTIONAL_FILES = [
     'myai.pt',
     'tokenizer.json',
     'myai_midepoch.pt',
+    # dot versions
     '.training_budget.json',
     '.autoscale.json',
     '.best_loss',
     '.data_hash',
     '.training_complete.json',
+    '.phase_state.json',
+    # plain versions (some tools write without dot)
+    'training_budget.json',
+    'autoscale.json',
+    'best_loss',
+    'data_hash',
+    'training_complete.json',
+    'phase_state.json',
     'chat.py',
     'download_data.py',
 ]
 
 COPY_LATEST_EPOCH_CKPT = True
+COPY_LATEST_PHASE_CKPT = True
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #   GITHUB PUSH
@@ -87,10 +105,9 @@ COPY_LATEST_EPOCH_CKPT = True
 
 _github_push_lock = threading.Lock()
 _push_count       = 0
-_push_disabled    = False   # set True after a permanent failure — stops all retries
+_push_disabled    = False
 
 def get_github_token():
-    """Read GitHub token from Kaggle Secrets or environment variable."""
     try:
         from kaggle_secrets import UserSecretsClient
         token = UserSecretsClient().get_secret("GITHUB_TOKEN")
@@ -102,20 +119,12 @@ def get_github_token():
     return token if token else None
 
 def run_cmd(cmd, cwd=None):
-    """Run shell command, return (success: bool, output: str)."""
     result = subprocess.run(cmd, shell=True, cwd=cwd,
                             capture_output=True, text=True)
     return result.returncode == 0, (result.stdout + result.stderr).strip()
 
 def push_to_github(reason="training finished"):
-    """
-    Clone repo → copy working files → commit → push.
-    Thread-safe. Called from atexit, signal handlers, periodic thread, and finally block.
-    Permanently disabled after a 403 / auth error so it never spams retries.
-    """
     global _push_count, _push_disabled
-
-    # ── Skip immediately if already known to be broken ─────────────────────────
     if _push_disabled:
         return False
 
@@ -127,7 +136,6 @@ def push_to_github(reason="training finished"):
     print(f"  GitHub Save #{current_push}  —  {reason}")
     print("═" * 60)
 
-    # ── Token ──────────────────────────────────────────────────────────────────
     token = get_github_token()
     if not token:
         print("✗ GITHUB_TOKEN not found — cannot save!")
@@ -141,7 +149,6 @@ def push_to_github(reason="training finished"):
         f"https://{GITHUB_USERNAME}:{token}@github.com/"
     )
 
-    # ── Clone ──────────────────────────────────────────────────────────────────
     clone_dir = '/kaggle/working/_github_save'
     if os.path.exists(clone_dir):
         shutil.rmtree(clone_dir, ignore_errors=True)
@@ -152,7 +159,6 @@ def push_to_github(reason="training finished"):
         print(f"  Branch '{GITHUB_BRANCH}' not found — creating it...")
         ok, out = run_cmd(f'git clone --depth=1 {repo_url} {clone_dir}')
         if not ok:
-            # Check for auth failure — permanent, no point retrying
             if "403" in out or "Permission" in out or "authentication" in out.lower():
                 _push_disabled = True
                 print(f"\n✗ Auth error — GitHub pushes DISABLED for this run.")
@@ -167,7 +173,7 @@ def push_to_github(reason="training finished"):
     run_cmd('git config user.email "kaggle@myai.bot"', cwd=clone_dir)
     run_cmd('git config user.name "MyAI Kaggle Bot"',  cwd=clone_dir)
 
-    # ── Build file list ────────────────────────────────────────────────────────
+    # Build file list
     to_push = list(FILES_TO_SAVE)
 
     if PUSH_EPOCH_CKPTS:
@@ -179,39 +185,43 @@ def push_to_github(reason="training finished"):
         )
         to_push += [os.path.basename(p) for p in ckpts]
 
+    if PUSH_PHASE_CKPTS:
+        pckpts = sorted(
+            glob.glob(os.path.join(WORKING, 'myai_phase*.pt')),
+            key=lambda p: int(
+                os.path.basename(p).replace('myai_phase','').replace('.pt','')
+            ) if os.path.basename(p).replace('myai_phase','').replace('.pt','').isdigit() else 0
+        )
+        to_push += [os.path.basename(p) for p in pckpts]
+
     if PUSH_TRAINING_DATA:
         to_push += TRAINING_DATA_FILES
 
-    # ── Copy files ─────────────────────────────────────────────────────────────
     print("\nCopying files into repo:")
     copied = []; skipped = []
     for fname in to_push:
         src = os.path.join(WORKING, fname)
         if not os.path.exists(src):
-            skipped.append(fname)
-            continue
+            skipped.append(fname); continue
         size = os.path.getsize(src)
         if size > 95 * 1024 * 1024:
-            print(f"  ⚠  {fname}  ({size/1024/1024:.0f} MB) — over GitHub 95MB limit, skipped")
-            skipped.append(fname)
-            continue
+            print(f"  ⚠  {fname}  ({size/1024/1024:.0f} MB) — over 95MB limit, skipped")
+            skipped.append(fname); continue
         try:
             shutil.copy2(src, os.path.join(clone_dir, fname))
             size_str = f"{size/1024/1024:.1f} MB" if size > 1024*1024 else f"{size/1024:.0f} KB"
             print(f"  ✓  {fname}  ({size_str})")
             copied.append(fname)
         except Exception as e:
-            print(f"  ✗  {fname}  ERROR: {e}")
-            skipped.append(fname)
+            print(f"  ✗  {fname}  ERROR: {e}"); skipped.append(fname)
 
     if not copied:
-        print("No files to push.")
-        return False
+        print("No files to push."); return False
 
     if skipped:
         print(f"\n  Skipped: {', '.join(skipped)}")
 
-    # ── Write save_info.json ───────────────────────────────────────────────────
+    # Write save_info.json
     save_info = {
         "saved_at":      time.strftime("%Y-%m-%d %H:%M:%S UTC"),
         "reason":        reason,
@@ -219,26 +229,47 @@ def push_to_github(reason="training finished"):
         "files_saved":   copied,
         "files_skipped": skipped,
     }
+    # Read phase progress
+    for ps_name in ('.phase_state.json', 'phase_state.json'):
+        ps_path = os.path.join(WORKING, ps_name)
+        if os.path.exists(ps_path):
+            try:
+                with open(ps_path) as f:
+                    ps = json.load(f)
+                save_info["phase"] = {
+                    "current":    ps.get("current_phase", "?"),
+                    "total":      ps.get("total_phases",  "?"),
+                    "chars_done": ps.get("chars_done",    0),
+                    "target":     ps.get("total_target",  0),
+                }
+            except Exception:
+                pass
+            break
+
     if 'myai.pt' in copied:
         try:
             import torch
             ckpt = torch.load(os.path.join(WORKING, 'myai.pt'), map_location='cpu')
-            save_info["epoch"]        = ckpt.get("epoch", "?")
-            save_info["best_loss"]    = round(float(ckpt.get("best_loss", 0) or 0), 4)
+            save_info["epoch"]     = ckpt.get("epoch", "?")
+            save_info["best_loss"] = round(float(ckpt.get("best_loss", 0) or 0), 4)
             cfg = ckpt.get("config", {})
             save_info["model_config"] = {k: cfg.get(k) for k in
                                          ("embed_dim","num_layers","num_heads","vocab_size")}
+            save_info["trained_chars"] = ckpt.get("trained_chars", 0)
         except Exception:
             pass
 
     with open(os.path.join(clone_dir, 'save_info.json'), 'w') as f:
         json.dump(save_info, f, indent=2)
 
-    # ── Commit & push ──────────────────────────────────────────────────────────
     ts      = time.strftime("%Y-%m-%d %H:%M")
     loss    = save_info.get("best_loss", "?")
     epoch   = save_info.get("epoch", "?")
-    message = f"[MyAI] {reason} | epoch={epoch} loss={loss} | {ts}"
+    phase_info = ""
+    if "phase" in save_info:
+        ph = save_info["phase"]
+        phase_info = f" phase={ph['current']}/{ph['total']}"
+    message = f"[MyAI] {reason} | epoch={epoch} loss={loss}{phase_info} | {ts}"
 
     print(f"\nCommit: {message}")
     run_cmd('git add -A', cwd=clone_dir)
@@ -255,15 +286,11 @@ def push_to_github(reason="training finished"):
         return True
     else:
         print(f"\n✗ Push failed:\n{out}")
-        # ── Permanent auth failure → disable for rest of session ───────────────
         if "403" in out or "Permission" in out or "authentication" in out.lower() \
                 or "denied" in out.lower():
             _push_disabled = True
             print("\n  ⛔ Auth error — GitHub auto-save DISABLED for this run.")
-            print("  Fix your token, then re-run the notebook:")
-            print("    1. GitHub → Settings → Developer settings → Tokens (classic)")
-            print("    2. Generate new token with 'repo' scope checked")
-            print("    3. Kaggle → Add-ons → Secrets → update GITHUB_TOKEN")
+            print("  Fix your token, then re-run the notebook.")
         else:
             print("  Will retry next save interval.")
         return False
@@ -274,19 +301,15 @@ _training_running = True
 def _periodic_saver():
     while _training_running:
         for _ in range(PERIODIC_SAVE_MINUTES * 60):
-            if not _training_running:
-                return
+            if not _training_running: return
             time.sleep(1)
-        if not _training_running:
-            return
-        if _push_disabled:
-            return   # stop the thread entirely once disabled
+        if not _training_running: return
+        if _push_disabled: return
         print(f"\n[auto-save] {PERIODIC_SAVE_MINUTES}min interval — pushing to GitHub...")
         push_to_github(reason=f"periodic save (every {PERIODIC_SAVE_MINUTES}min)")
 
 _saver_thread = threading.Thread(target=_periodic_saver, daemon=True)
 
-# ── Exit handlers — fire on ANY kind of stop ──────────────────────────────────
 def _atexit_handler():
     if not _push_disabled:
         push_to_github(reason="session ended (atexit)")
@@ -338,7 +361,6 @@ print(f"\nDataset : {BASE}")
 os.chdir(WORKING)
 print(f"Working : {WORKING}\n")
 
-# ── Required code ──────────────────────────────────────────────────────────────
 print("── Required code files ─────────────────────────────────")
 missing = []
 for f in REQUIRED_FILES:
@@ -349,7 +371,6 @@ if missing:
     print(f"\n✗ FATAL: missing required files: {missing}")
     sys.exit(1)
 
-# ── Training data ──────────────────────────────────────────────────────────────
 print("\n── Training data ───────────────────────────────────────")
 data_copied = False
 for data_file in TRAINING_DATA_OPTIONS:
@@ -360,7 +381,6 @@ for data_file in TRAINING_DATA_OPTIONS:
 if not data_copied:
     print("  ✗ No training data found!"); sys.exit(1)
 
-# ── Optional files ─────────────────────────────────────────────────────────────
 print("\n── Checkpoint & state files ────────────────────────────")
 found_checkpoint = False
 for f in OPTIONAL_FILES:
@@ -385,7 +405,20 @@ if COPY_LATEST_EPOCH_CKPT:
     else:
         print("  –  myai_epoch*.pt  (none found)")
 
-# ── Summary ────────────────────────────────────────────────────────────────────
+if COPY_LATEST_PHASE_CKPT:
+    pckpts = sorted(
+        glob.glob(os.path.join(BASE, 'myai_phase*.pt')),
+        key=lambda p: int(
+            os.path.basename(p).replace('myai_phase','').replace('.pt','')
+        ) if os.path.basename(p).replace('myai_phase','').replace('.pt','').isdigit() else 0
+    )
+    if pckpts:
+        latest_p = pckpts[-1]
+        copy_file(latest_p, os.path.join(WORKING, os.path.basename(latest_p)),
+                  label=f"{os.path.basename(latest_p)} (latest phase ckpt)")
+    else:
+        print("  –  myai_phase*.pt  (none found)")
+
 print("\n── Summary ─────────────────────────────────────────────")
 if found_checkpoint:
     try:
@@ -394,18 +427,43 @@ if found_checkpoint:
         epoch    = ckpt.get('epoch', '?')
         loss     = ckpt.get('best_loss', None)
         loss_str = f"{loss:.4f}" if loss is not None else "n/a"
+        trained  = ckpt.get('trained_chars', 0)
         cfg      = ckpt.get('config', {})
-        print(f"  Mode      : RESUME")
-        print(f"  Epoch     : {epoch}")
-        print(f"  Best loss : {loss_str}")
+        print(f"  Mode          : RESUME")
+        print(f"  Epoch         : {epoch}")
+        print(f"  Best loss     : {loss_str}")
+        if trained: print(f"  Trained chars : {trained:,}")
         if cfg:
-            print(f"  Model     : embed={cfg.get('embed_dim')}  "
+            print(f"  Model         : embed={cfg.get('embed_dim')}  "
                   f"layers={cfg.get('num_layers')}  heads={cfg.get('num_heads')}")
     except Exception as e:
-        print(f"  Mode      : RESUME  (could not read details: {e})")
+        print(f"  Mode          : RESUME  (could not read details: {e})")
 else:
-    print("  Mode      : FRESH START  (no myai.pt found in dataset)")
-    print("  Tip: download myai.pt from GitHub after a run and re-upload to dataset")
+    print("  Mode          : FRESH START  (no myai.pt found in dataset)")
+
+# Show phase progress if available
+for ps_name in ('.phase_state.json', 'phase_state.json'):
+    ps_path = os.path.join(WORKING, ps_name)
+    if os.path.exists(ps_path):
+        try:
+            with open(ps_path) as f: ps = json.load(f)
+            ph_cur   = ps.get("current_phase", 0)
+            ph_tot   = ps.get("total_phases", "?")
+            ph_done  = ps.get("chars_done", 0)
+            ph_tgt   = ps.get("total_target", 0)
+            ph_size  = ps.get("phase_size", 0)
+            pct      = ph_done / ph_tgt * 100 if ph_tgt > 0 else 0
+            def _fs(n):
+                if n >= 1_000_000: return f"{n/1_000_000:.1f}m"
+                if n >= 1_000: return f"{n/1_000:.0f}k"
+                return str(n)
+            print(f"\n  Phase progress: {ph_cur}/{ph_tot}  "
+                  f"({_fs(ph_done)}/{_fs(ph_tgt)} = {pct:.0f}%)")
+            print(f"  Phase size    : +{_fs(ph_size)} per phase")
+            print(f"  Target loss   : ≤ {ps.get('target_loss', 0.5)}")
+        except Exception:
+            pass
+        break
 
 token_ok = bool(get_github_token())
 print(f"\n  GitHub    : {GITHUB_REPO}")
@@ -416,14 +474,11 @@ if not token_ok:
 
 print("\n" + "═" * 60)
 print("  Starting training...")
+print("  Kaggle will auto-set 1m chars target, expanding by 1m")
+print("  each time loss ≤ 0.50. No prompts needed — fully automatic.")
 print("═" * 60 + "\n")
 
-# ── Start periodic background saver ───────────────────────────────────────────
 _saver_thread.start()
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#   TRAIN
-# ═══════════════════════════════════════════════════════════════════════════════
 
 try:
     exit_code = os.system('python train.py')

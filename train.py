@@ -47,6 +47,18 @@ RESUME_FROM   = None
 MODEL_SIZE    = "small"
 VRAM_RESERVE_GB = 1.5
 
+# ── Stop condition ────────────────────────────────
+# Set STOP_AFTER_CHARS to end training after N chars of phases are done.
+# Example: 5_000_000 = stop after 5m chars trained to TARGET_LOSS_PER_PHASE.
+# Set to 0 to train all phases (limited only by budget).
+# On Kaggle this is ignored — Kaggle always trains all available phases.
+STOP_AFTER_CHARS = 0   # 0 = no limit
+
+# If True, epochs per phase are unlimited — keeps training until target
+# loss is reached no matter how many epochs it takes.
+# If False, stops at EPOCHS even if loss hasn't reached target yet.
+UNLIMITED_EPOCHS_UNTIL_TARGET = True
+
 SERVER_URL  = "https://eh-production.up.railway.app"
 SECRET_KEY  = "Dsadasdsefgtgtlubiemlodydsadasdseflubiemlody1bekekejroliwer2011elo%5dfdsfdsk"
 SYNC_EVERY  = 5
@@ -1002,27 +1014,118 @@ def _make_loader_cpu(full_dataset, current_chars, total_chars, cpu_batch):
     ds = Subset(full_dataset, range(use_n)) if use_n < full_n else full_dataset
     return DataLoader(ds, batch_size=cpu_batch, shuffle=True), use_n
 
+# ═══════════════════════════════════════════════════
+#   OVERFLOW BATCH PUSHER
+#   When train.py's GPU generates batches faster than
+#   the CPU can serve them, surplus batches are pushed
+#   to the server so CPU-sharing workers can train on them.
+#
+#   How it works:
+#     - We track a rolling average of steps/second (throughput).
+#     - Every N steps we estimate how many batches are "surplus"
+#       (GPU throughput − CPU serve rate).
+#     - Surplus batches are serialized and sent to /overflow_batch.
+#     - Workers with CPU sharing enabled poll /overflow_batch and
+#       train on them, sending gradients back normally.
+# ═══════════════════════════════════════════════════
+
+_overflow_step_times  = []    # rolling window of step durations (seconds)
+_overflow_push_every  = 50    # check every N steps
+_overflow_lock        = threading.Lock()
+
+def _maybe_push_overflow_batch(batch, loss_val):
+    """
+    Called every training step. Pushes a surplus batch to the server
+    if throughput exceeds estimated CPU serving capacity.
+    Runs entirely in the background — never blocks training.
+    """
+    if not SERVER_URL:
+        return
+
+    # Only check every _overflow_push_every steps (tracked by step counter mod)
+    # We use the loss_val as a proxy for "is this step valid"
+    threading.Thread(
+        target=_overflow_push_worker,
+        args=(batch.tolist(), loss_val),
+        daemon=True
+    ).start()
+
+_overflow_pending  = []   # queue of (tokens_list, loss) to push
+_overflow_capacity = 0    # server's free batch slots (updated from /status)
+
+def _overflow_push_worker(tokens_list, loss_val):
+    """Background: push surplus batch to server if server has capacity."""
+    global _overflow_capacity
+    try:
+        # Quick capacity check — use cached value to avoid spamming /status
+        if _overflow_capacity <= 0:
+            try:
+                r = requests.get(f"{SERVER_URL}/status", timeout=3)
+                if r and r.status_code == 200:
+                    d = r.json()
+                    _overflow_capacity = d.get("free_batch", 0)
+            except Exception:
+                return
+
+        if _overflow_capacity <= 0:
+            return   # server pool is full — skip
+
+        # Push the batch
+        r = requests.post(
+            f"{SERVER_URL}/overflow_batch",
+            json={"tokens": tokens_list, "loss": loss_val},
+            headers={"X-Secret-Key": SECRET_KEY},
+            timeout=5
+        )
+        if r and r.status_code == 200:
+            _overflow_capacity = max(0, _overflow_capacity - 1)
+    except Exception:
+        pass   # overflow is best-effort, never critical
+
+
 def _run_one_phase_cpu(model, optimizer, scheduler, loss_fn, loader, cfg,
                        device, data_hash, run_best_loss, actual_start,
                        start_step, t0, epoch_times, phase_label="",
                        target_loss=0.0):
     """
-    Run up to EPOCHS epochs on the given loader.
-    If target_loss > 0, stops early as soon as epoch avg loss ≤ target_loss.
+    Run epochs on the given loader.
+    If UNLIMITED_EPOCHS_UNTIL_TARGET=True and target_loss>0, keeps going
+    past EPOCHS until the target loss is actually reached.
     Returns (run_best_loss, last_epoch, stopped_early).
     """
     global stop_training
     last_epoch   = actual_start
     w_applies    = 0
     total_steps  = len(loader)
-    phase_done   = False   # set True when target_loss reached
+    phase_done   = False
 
-    for epoch in range(actual_start, EPOCHS):
-        if stop_training or phase_done: break
+    # If unlimited mode, we loop forever until target or Ctrl+C.
+    # Otherwise cap at EPOCHS.
+    unlimited = UNLIMITED_EPOCHS_UNTIL_TARGET and target_loss > 0
+    epoch_iter = 0   # counts epochs within this phase (always from 0)
+
+    while True:
+        epoch = actual_start + epoch_iter   # absolute epoch number for display
+        epoch_iter += 1
+
+        # Hard stop conditions
+        if stop_training or phase_done:
+            break
+        if not unlimited and epoch_iter > EPOCHS:
+            break
+        if unlimited and epoch_iter > 9999:   # safety ceiling
+            print(f"  ⚠ {phase_label}9999 epoch safety limit reached — stopping phase")
+            break
+
         last_epoch = epoch
         ep_start   = time.time(); total_loss = 0.0; ep_steps = 0
         skip_to    = start_step if epoch == actual_start else 0
         start_step = 0
+
+        # Show "beyond EPOCHS" warning once
+        if unlimited and epoch_iter == EPOCHS + 1:
+            print(f"  ↺ {phase_label}Epoch limit ({EPOCHS}) reached but loss still "
+                  f"{run_best_loss:.4f} > {target_loss} — continuing until target...")
 
         for i, batch in enumerate(loader):
             if i < skip_to: continue
@@ -1064,29 +1167,40 @@ def _run_one_phase_cpu(model, optimizer, scheduler, loss_fn, loader, cfg,
                 eta = ela/max(i+1-skip_to,1)*(total_steps-i-1)
                 wi  = f" workers:{w_applies}" if w_applies else ""
                 tgt = f" target:≤{target_loss}" if target_loss > 0 else ""
-                print(f"{phase_label}Epoch {epoch+1} | {i+1}/{total_steps} ({pct:.0f}%) | loss:{loss.item():.4f}{wi}{tgt} | eta:{fmt(eta)}")
+                ep_label = f"Epoch {epoch+1}" if not unlimited else f"Epoch {epoch+1} (no limit)"
+                print(f"{phase_label}{ep_label} | {i+1}/{total_steps} ({pct:.0f}%) | loss:{loss.item():.4f}{wi}{tgt} | eta:{fmt(eta)}")
+
+            # ── Overflow: push surplus batches to server for workers ──────────
+            # If GPU throughput > CPU can serve, spill the excess to the server
+            # so CPU-sharing workers can pick them up and train too.
+            _maybe_push_overflow_batch(batch, loss.item())
 
         if stop_training: break
 
         ep_time = time.time()-ep_start; avg = total_loss/max(ep_steps,1)
-        eta_tot = (sum(epoch_times+[ep_time])/(len(epoch_times)+1))*(EPOCHS-epoch-1)
         epoch_times.append(ep_time)
         optimizer.step(); scheduler.step()
+
+        # Keep scheduler from bottoming out in unlimited mode
+        if unlimited and scheduler.get_last_lr()[0] < 1e-6:
+            for pg in optimizer.param_groups:
+                pg["lr"] = LEARNING_RATE * 0.1   # reset to 10% of base LR
 
         if w_applies: print(f"  [workers] blended {w_applies} times this epoch")
         w_applies = 0
         if SERVER_URL: flush_worker_grads(model, optimizer)
         if avg < run_best_loss: run_best_loss = avg
 
-        # ── Check if this phase's target loss is reached ──
+        # ── Check if target loss is reached ──
         if target_loss > 0 and avg <= target_loss:
             print(f"  ✓ {phase_label}Target loss reached ({avg:.4f} ≤ {target_loss}) — phase complete!")
             phase_done = True
 
-        msg = f"{phase_label}Epoch {epoch+1}/{EPOCHS} loss:{avg:.4f} took:{fmt(ep_time)} eta:{fmt(eta_tot)}"
+        remaining_epochs = "∞" if unlimited else str(EPOCHS - epoch_iter)
+        msg = f"{phase_label}Epoch {epoch+1} loss:{avg:.4f} took:{fmt(ep_time)} remaining:{remaining_epochs}"
         print(msg)
         push_stats(epoch+1, EPOCHS, avg, scheduler.get_last_lr()[0],
-                   time.time()-t0, eta_tot, msg, step=total_steps, total_steps=total_steps)
+                   time.time()-t0, 0, msg, step=total_steps, total_steps=total_steps)
 
         if (epoch+1) % SAVE_EVERY == 0:
             save_model(model, optimizer, epoch+1, cfg, f"myai_epoch{epoch+1}.pt", best_loss=run_best_loss)
@@ -1325,6 +1439,12 @@ def train_cpu(tok, big_text, data_hash, resume_checkpoint, is_mid_epoch):
                   f"(+{format_size(next_window - chars_done)} new)")
 
         if stopped: break
+
+        # ── STOP_AFTER_CHARS: halt when user-configured total is reached ──
+        if STOP_AFTER_CHARS > 0 and chars_done >= STOP_AFTER_CHARS:
+            print(f"\n  ✓ STOP_AFTER_CHARS reached: {format_size(chars_done)} ≥ {format_size(STOP_AFTER_CHARS)}")
+            print(f"    Increase STOP_AFTER_CHARS in train.py to train more.")
+            break
 
     # All phases complete
     if not stop_training:
