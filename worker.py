@@ -274,8 +274,15 @@ def main():
     cap          = resp.get("cap", server_batch)
     cfg_snap     = resp.get("config", {})
     min_batch    = cfg_snap.get("min_batch", 1)
+    # Read server CPU-share requirement
+    server_wants_cpu = cfg_snap.get("allow_cpu_share", False)
+    server_cpu_threads = cfg_snap.get("cpu_threads", 2)
 
     print(f"Assigned: {server_batch} batches (cap={cap})")
+    if server_wants_cpu:
+        print(f"  Server requests CPU sharing: {server_cpu_threads} thread(s)")
+        torch.set_num_threads(server_cpu_threads)
+        print(f"  CPU sharing enabled — torch threads set to {server_cpu_threads}")
 
     # ── Download tokenizer ─────────────────────────
     print("Downloading tokenizer...")
@@ -376,7 +383,8 @@ def main():
     scaler    = torch.cuda.amp.GradScaler() if device_label == "cuda" else None
 
     # Live config (updated by heartbeat)
-    live = {"batch": batch_size, "min_batch": min_batch}
+    live = {"batch": batch_size, "min_batch": min_batch,
+            "cpu_share": server_wants_cpu, "cpu_threads": server_cpu_threads}
 
     # ── Heartbeat ──────────────────────────────────
     def heartbeat():
@@ -396,43 +404,63 @@ def main():
                     print(f"[reconnected] batch={live['batch']}")
                 elif r.get("status") == "ok":
                     nc = r.get("config", {})
-                    live["min_batch"] = nc.get("min_batch", 1)
-                    live["batch"] = max(live["min_batch"],
+                    live["min_batch"]   = nc.get("min_batch", 1)
+                    live["batch"]       = max(live["min_batch"],
                         min(r.get("batch", live["batch"]), safe))
+                    # Live CPU share update
+                    new_cpu_share   = nc.get("allow_cpu_share", False)
+                    new_cpu_threads = nc.get("cpu_threads", 2)
+                    if new_cpu_share != live["cpu_share"] or new_cpu_threads != live["cpu_threads"]:
+                        live["cpu_share"]   = new_cpu_share
+                        live["cpu_threads"] = new_cpu_threads
+                        if new_cpu_share:
+                            torch.set_num_threads(new_cpu_threads)
+                            print(f"[config] CPU sharing enabled — {new_cpu_threads} thread(s)")
+                        else:
+                            torch.set_num_threads(max(1, os.cpu_count() or 1))
+                            print(f"[config] CPU sharing disabled — threads restored")
             except Exception as e:
                 print(f"[heartbeat] {e}")
     threading.Thread(target=heartbeat, daemon=True).start()
 
     # ── Training loop ──────────────────────────────
-    print("Contributing computing power — press Ctrl+C to stop\n")
+    print("="*54)
+    print("  Contributing to your AI — Ctrl+C to stop")
+    print(f"  Every batch you run helps reduce the training loss.")
+    print(f"  Your gradients are blended into train.py in real-time.")
+    print("="*54 + "\n")
     done = 0; total_loss = 0.0; t0 = time.time()
     last_weight_refresh = 0
+    _no_data_warned = False
 
     try:
         while True:
             bs = live["batch"]
 
             # ── Refresh model weights from server ─────
-            # Critical: without this, worker gradients point in the wrong
-            # direction (based on old weights) and hurt training instead of helping.
             if done - last_weight_refresh >= REFRESH_WEIGHTS_EVERY:
                 updated = download_model_weights(model, device)
                 if updated:
-                    # Reset optimizer momentum since weights changed significantly
                     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
                     last_weight_refresh = done
-                    print(f"  [weights] refreshed from server (batch {done})")
+                    print(f"  [weights] refreshed from server at batch {done} — gradients now in sync")
 
             # ── Get training batch from server ────────
             try:
                 resp = requests.get(f"{SERVER_URL}/get_batch",
                     params={"worker_id": worker_id, "size": bs}, timeout=30)
             except Exception as e:
-                print(f"Batch error: {e}"); time.sleep(5); continue
+                print(f"  [net] batch fetch failed: {e} — retrying in 5s"); time.sleep(5); continue
 
             if resp.status_code == 204:
-                print("No data — waiting..."); time.sleep(5); continue
+                if not _no_data_warned:
+                    print("  [wait] Server has no training data yet.")
+                    print("         train.py uploads it at startup — make sure it's running.")
+                    _no_data_warned = True
+                time.sleep(5); continue
+            _no_data_warned = False
             if resp.status_code != 200:
+                print(f"  [net] server returned HTTP {resp.status_code} — retrying in 5s")
                 time.sleep(5); continue
 
             bd     = resp.json()
@@ -459,18 +487,15 @@ def main():
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache(); optimizer.zero_grad()
                 live["batch"] = max(1, live["batch"]//2)
-                print(f"OOM — batch reduced to {live['batch']}"); continue
+                print(f"  [OOM] batch too large — reduced to {live['batch']}"); continue
 
             # ── Send gradients to server ───────────────
-            # Only send gradients for parameters that actually changed.
-            # Compress: send mean+std instead of full tensor for large params.
             grads = {}
             for name, param in model.named_parameters():
                 if param.grad is None: continue
                 g = param.grad.cpu()
-                # For large params (>10k elements), quantize to save bandwidth
                 if g.numel() > 10_000:
-                    grads[name] = g.half().tolist()   # float16 = 2x smaller
+                    grads[name] = g.half().tolist()
                 else:
                     grads[name] = g.tolist()
 
@@ -482,19 +507,23 @@ def main():
                     "batch_id":  bd["batch_id"],
                 }, timeout=30)
             except Exception:
-                pass   # gradient loss is recoverable
+                pass   # gradient loss is recoverable — next batch will submit fresh ones
 
             done += 1; total_loss += loss.item(); avg = total_loss/done
             ela = time.time()-t0; rate = done/ela if ela>0 else 0
-            print(f"[{done:4d}] loss:{loss.item():.4f} avg:{avg:.4f} "
-                  f"batch:{bs} {rate:.2f}b/s up:{fmt(ela)}")
+            # Show something meaningful — loss going down = your AI is getting smarter
+            trend = "↓" if done > 1 and loss.item() < (total_loss-loss.item())/max(done-1,1) else " "
+            print(f"  [{done:4d}] loss:{loss.item():.4f} {trend}  avg:{avg:.4f}  "
+                  f"batch:{bs}  {rate:.2f}b/s  up:{fmt(ela)}")
 
     except KeyboardInterrupt:
-        print("\nStopping — returning batches to pool...")
+        print("\n  Stopping — returning your batch allocation to the pool...")
         try:
             requests.post(f"{SERVER_URL}/leave",
                 json={"worker_id": worker_id}, timeout=5)
-            print(f"Done! Contributed {done} batches. Thanks!")
+            print(f"  Done! You contributed {done} batches to training your AI.")
+            if done > 0:
+                print(f"  Final avg loss: {total_loss/done:.4f}  |  session: {fmt(time.time()-t0)}")
         except Exception: pass
 
 if __name__ == "__main__":

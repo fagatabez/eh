@@ -79,18 +79,23 @@ PROGRESSIVE_FACTOR  = 2.0    # double the slice each time
 # ─────────────────────────────────────────────────
 
 # ── Phase training ────────────────────────────────
-# Instead of training on the full budget at once, split it into
-# phases of PHASE_SIZE chars and repeat until the full target is done.
+# ALWAYS enabled. Trains in 100k-char cumulative chunks until loss ≤ 0.50,
+# then expands to ALL chars seen so far before adding the next 100k.
 #
-# Example: budget=1m, phase=100k → 10 phases of 100k each.
-# Each phase trains fully, saves a checkpoint, then moves to the next.
-# This means short sessions still make real progress — you can stop
-# after any phase and resume from the last phase checkpoint.
+# Phase 1: trains on 100k chars → must reach loss ≤ 0.50
+# Phase 2: trains on 200k chars (all of phase 1 + 100k new) → loss ≤ 0.50
+# Phase 3: trains on 300k chars → loss ≤ 0.50  ...and so on.
 #
-# Set PHASE_TRAINING = False to train the full budget in one go (old behaviour).
-PHASE_TRAINING      = False   # set True to enable, or train.py will ask on first run
-PHASE_SIZE          = 0       # chars per phase — 0 = ask user on first run
-PHASE_FILE          = ".phase_state.json"  # tracks which phase we're on
+# After hitting the target, a "generalization pass" runs on rephrased +
+# out-of-window data to prevent pure memorization.
+PHASE_TRAINING        = True
+PHASE_SIZE            = 100_000    # new chars added per phase
+PHASE_FILE            = ".phase_state.json"
+
+# Loss each phase must reach before expanding.
+TARGET_LOSS_PER_PHASE = 0.50
+
+KAGGLE_PHASE_SIZE     = 100_000
 
 # ═══════════════════════════════════════════════════
 #   TRAINING BUDGET — how much data to use
@@ -161,14 +166,18 @@ def get_or_ask_budget(total_chars):
     complete = load_training_complete()
 
     if on_kaggle:
-        current = total_chars
-        if budget:
-            kval = budget.get("kaggle", 0)
-            current = kval if kval > 0 else total_chars
-            current = max(current, total_chars)
-        print(f"\n[Kaggle detected] Using FULL dataset: {format_size(total_chars)} chars")
+        # On Kaggle with no budget file → auto-set 1m phase target.
+        # Phase training will then expand by 1m each time loss ≤ 0.50.
+        # This means no prompts ever appear on Kaggle — fully automatic.
         if budget is None:
-            budget = {}
+            kaggle_start = min(1_000_000, total_chars)
+            budget = {"kaggle": kaggle_start, "current": kaggle_start, "user": kaggle_start}
+            save_budget(budget)
+            print(f"\n[Kaggle] No budget file found — auto-set to {format_size(kaggle_start)} "
+                  f"(phases of {format_size(KAGGLE_PHASE_SIZE)}, expanding at loss ≤ {TARGET_LOSS_PER_PHASE})")
+        current = budget.get("current", budget.get("kaggle", total_chars))
+        current = min(current, total_chars)
+        print(f"\n[Kaggle] Training budget: {format_size(current)} / {format_size(total_chars)} chars")
         budget["kaggle"]  = current
         budget["current"] = current
         save_budget(budget)
@@ -481,55 +490,67 @@ def clear_phase_state():
         if os.path.exists(PHASE_FILE): os.remove(PHASE_FILE)
     except: pass
 
-def ask_phase_config(total_budget_chars):
-    """Ask user if they want phase training and how big each phase should be."""
-    print("\nPhase training — train in small chunks instead of all at once?")
-    print("  Example: budget=1m, phase=100k → 10 phases of 100k chars each")
-    print("  Each phase saves a checkpoint — safe to stop between phases.")
-    raw = input("  Enable phase training? [yes/no, default=no]: ").strip().lower()
-    if raw not in ("yes", "y"):
-        return None   # disabled
-
-    print(f"\n  Total budget: {format_size(total_budget_chars)} chars")
-    print(f"  How big should each phase be?")
-    print(f"  Examples: 100k  500k  1m")
-    while True:
-        raw2 = input("  Phase size: ").strip()
-        try:
-            size = parse_size(raw2)
-            if size <= 0: print("  Must be > 0"); continue
-            if size >= total_budget_chars:
-                print(f"  Phase size must be smaller than total budget ({format_size(total_budget_chars)})")
-                continue
-            break
-        except ValueError as e:
-            print(f"  {e}")
-
+def _build_phase_state(size, total_budget_chars):
+    """Create a fresh phase state dict for the given phase size."""
     total_phases = max(1, -(-total_budget_chars // size))  # ceiling division
+    return {
+        "phase_size":    size,
+        "total_target":  total_budget_chars,
+        "current_phase": 0,
+        "total_phases":  total_phases,
+        "chars_done":    0,
+        "target_loss":   TARGET_LOSS_PER_PHASE,
+        "enabled":       True,
+    }
+
+def ask_phase_config(total_budget_chars):
+    """Auto-configure phases — never prompts. Always 100k cumulative.
+    On Kaggle uses KAGGLE_PHASE_SIZE (same 100k default)."""
+    size = KAGGLE_PHASE_SIZE if is_kaggle() else PHASE_SIZE
+    size = min(size, total_budget_chars)
+    total_phases = max(1, -(-total_budget_chars // size))
     state = {
         "phase_size":    size,
         "total_target":  total_budget_chars,
         "current_phase": 0,
         "total_phases":  total_phases,
         "chars_done":    0,
+        "target_loss":   TARGET_LOSS_PER_PHASE,
         "enabled":       True,
+        "cumulative":    True,
     }
     save_phase_state(state)
-    print(f"\n  Phase training ON: {format_size(size)} × {total_phases} phases = {format_size(total_budget_chars)} total")
-    print(f"  State saved to {PHASE_FILE} — delete it to reconfigure.")
+    print(f"\n[Phase training] AUTO-ENABLED (cumulative expansion):")
+    print(f"  Chunk size : +{format_size(size)} chars each phase")
+    print(f"  Phases     : {total_phases}  (window grows: {format_size(size)} → {format_size(size*2)} → ...)")
+    print(f"  Target loss: ≤ {TARGET_LOSS_PER_PHASE} before expanding")
+    print(f"  Total      : {format_size(total_budget_chars)} chars")
     return state
 
 def get_phase_config(total_budget_chars):
-    """Load or create phase config. Returns state dict or None if disabled."""
+    """Always returns a phase config — auto-creates if missing, never disables."""
     state = load_phase_state()
     if state is not None:
         if not state.get("enabled", True):
-            return None
-        # Sanity: if budget changed, reset
+            clear_phase_state()
+            return ask_phase_config(total_budget_chars)
         if state.get("total_target", 0) != total_budget_chars:
             print(f"  [phase] Budget changed — resetting phase state")
             clear_phase_state()
             return ask_phase_config(total_budget_chars)
+        # Patch old saved states missing new fields
+        changed = False
+        if "target_loss" not in state:
+            state["target_loss"] = TARGET_LOSS_PER_PHASE; changed = True
+        if "cumulative" not in state:
+            state["cumulative"] = True; changed = True
+        if changed:
+            save_phase_state(state)
+        ph = state["current_phase"]
+        ph_total = state["total_phases"]
+        ph_done  = state["chars_done"]
+        print(f"\n  Resuming phase {ph+1}/{ph_total} "
+              f"({format_size(ph_done)}/{format_size(total_budget_chars)} trained so far)")
         return state
     return ask_phase_config(total_budget_chars)
 
@@ -550,6 +571,75 @@ def save_training_complete(chars_trained, total_chars, best_loss, data_hash):
     }
     with open(TRAINING_COMPLETE_FILE, "w") as f:
         json.dump(info, f, indent=2)
+
+def upload_state_files():
+    """
+    Upload all state/config files to the server after training ends.
+    Uploads both the dot version (e.g. .best_loss) AND the plain version
+    (best_loss) if they exist — download_results.py will grab whichever exist.
+
+    Also uploads the latest myai_epochN.pt checkpoint.
+    """
+    if not SERVER_URL:
+        return
+
+    print("\n[sync] Uploading state files to server for download_results.py ...")
+    hdrs = {"X-Secret-Key": SECRET_KEY}
+
+    # Pairs: (filename_on_disk, name_to_send_to_server)
+    # We send the file under its actual name — server stores it under that name.
+    candidates = [
+        # dot versions (hidden files)
+        ".best_loss",
+        ".data_hash",
+        ".training_budget.json",
+        ".phase_state.json",
+        ".training_complete.json",
+        ".autoscale.json",
+        # plain versions (some tools write without dot)
+        "best_loss",
+        "data_hash",
+        "training_budget.json",
+        "phase_state.json",
+        "training_complete.json",
+        "autoscale.json",
+    ]
+
+    # Also find the latest myai_epochN.pt
+    import glob as _glob, re as _re
+    epoch_ckpts = sorted(
+        [f for f in _glob.glob("myai_epoch*.pt")
+         if _re.match(r'^myai_epoch\d+\.pt$', f)],
+        key=lambda f: int(_re.search(r'\d+', f).group())
+    )
+    if epoch_ckpts:
+        candidates.append(epoch_ckpts[-1])   # only the latest
+
+    uploaded = []; missing = []
+    for fname in candidates:
+        if not os.path.exists(fname):
+            missing.append(fname)
+            continue
+        try:
+            with open(fname, "rb") as f:
+                data = f.read()
+            r = requests.post(
+                f"{SERVER_URL}/file/{fname}",
+                data=data, headers=hdrs, timeout=60
+            )
+            if r and r.status_code == 200:
+                size = len(data)
+                sz_str = f"{size/1024/1024:.1f}MB" if size > 1024*1024 else f"{size/1024:.0f}KB"
+                print(f"  ✓  {fname}  ({sz_str})")
+                uploaded.append(fname)
+            else:
+                print(f"  ✗  {fname}  (HTTP {r.status_code if r else '?'})")
+        except Exception as e:
+            print(f"  ✗  {fname}  ({e})")
+
+    if uploaded:
+        print(f"[sync] State files uploaded: {len(uploaded)} file(s)")
+        print(f"[sync] Run  python download_results.py  on your PC to get everything.")
 
 def load_training_complete():
     try:
@@ -580,7 +670,14 @@ def save_autoscale(cfg):
         json.dump(cfg, f, indent=2)
 
 def ask_autoscale():
-    """Ask the user once about auto-scaling. Returns dict or None."""
+    """Ask the user once about auto-scaling. On Kaggle, auto-enables silently."""
+    # On Kaggle there's no interactive terminal — auto-enable with 1m steps
+    if is_kaggle():
+        cfg = {"enabled": True, "step_chars": 1_000_000}
+        save_autoscale(cfg)
+        print(f"  [Kaggle] Auto-expand enabled: +1m chars per run (saved to {AUTOSCALE_FILE})")
+        return cfg
+
     print("\nAuto-expand after training finishes?")
     print("  If yes, next run will automatically train on extra chars.")
     raw = input("  Auto-expand? [yes/no]: ").strip().lower()
@@ -880,52 +977,15 @@ def flush_worker_grads(model, optimizer):
 
 # ═══════════════════════════════════════════════════
 #   MICRO-STEP SERVER SYNC
-#   Called in a background thread every 10 steps so
-#   workers always have fresh weights to train on.
+#   Stats (tiny JSON) are pushed every 10 steps.
+#   Model weights (135 MB) are NOT pushed here —
+#   uploading 135 MB every 10 steps was OOM-killing
+#   Railway. Weights sync end-of-phase via file watcher.
 # ═══════════════════════════════════════════════════
 
-_last_microstep_push = 0.0   # throttle: don't push more than once per 15s
-_microstep_lock      = threading.Lock()
-
 def _push_model_microstep(model, optimizer, epoch, step, cfg, best_loss):
-    """
-    Push current weights to server in the background.
-    Throttled to at most once every 15 seconds so we don't flood bandwidth.
-    """
-    global _last_microstep_push
-    with _microstep_lock:
-        now = time.time()
-        if now - _last_microstep_push < 15:
-            return   # too soon — skip this push
-        _last_microstep_push = now
-
-    if not SERVER_URL:
-        return
-
-    # Serialise model to bytes in memory (avoids touching myai.pt on disk)
-    try:
-        m = model.module if hasattr(model, "module") else model
-        buf = {}
-        buf["model"]   = {k: v.cpu() for k, v in m.state_dict().items()}
-        buf["epoch"]   = epoch
-        buf["step"]    = step
-        buf["config"]  = vars(cfg)
-        buf["system"]  = SYSTEM_PROMPT
-        buf["best_loss"] = best_loss
-
-        import io as _io
-        b = _io.BytesIO()
-        torch.save(buf, b)
-        data = b.getvalue()
-
-        hdrs = {"X-Secret-Key": SECRET_KEY}
-        r = requests.post(f"{SERVER_URL}/model", data=data, headers=hdrs, timeout=30)
-        if r and r.status_code == 200:
-            print(f"[sync] ✓ model pushed at step {step} (epoch {epoch+1})")
-        else:
-            pass   # silent fail — not critical
-    except Exception as e:
-        pass   # background push failure is non-fatal
+    """No-op — kept so call sites don't break."""
+    pass
 
 
 # ═══════════════════════════════════════════════════
@@ -944,19 +1004,21 @@ def _make_loader_cpu(full_dataset, current_chars, total_chars, cpu_batch):
 
 def _run_one_phase_cpu(model, optimizer, scheduler, loss_fn, loader, cfg,
                        device, data_hash, run_best_loss, actual_start,
-                       start_step, t0, epoch_times, phase_label=""):
+                       start_step, t0, epoch_times, phase_label="",
+                       target_loss=0.0):
     """
-    Run EPOCHS epochs on the given loader.
+    Run up to EPOCHS epochs on the given loader.
+    If target_loss > 0, stops early as soon as epoch avg loss ≤ target_loss.
     Returns (run_best_loss, last_epoch, stopped_early).
-    Shared by both normal training and each phase of phase training.
     """
     global stop_training
-    last_epoch = actual_start
-    w_applies  = 0
-    total_steps = len(loader)
+    last_epoch   = actual_start
+    w_applies    = 0
+    total_steps  = len(loader)
+    phase_done   = False   # set True when target_loss reached
 
     for epoch in range(actual_start, EPOCHS):
-        if stop_training: break
+        if stop_training or phase_done: break
         last_epoch = epoch
         ep_start   = time.time(); total_loss = 0.0; ep_steps = 0
         skip_to    = start_step if epoch == actual_start else 0
@@ -1001,7 +1063,8 @@ def _run_one_phase_cpu(model, optimizer, scheduler, loss_fn, loader, cfg,
                 pct = (i+1)/total_steps*100; ela = time.time()-ep_start
                 eta = ela/max(i+1-skip_to,1)*(total_steps-i-1)
                 wi  = f" workers:{w_applies}" if w_applies else ""
-                print(f"{phase_label}Epoch {epoch+1} | {i+1}/{total_steps} ({pct:.0f}%) | loss:{loss.item():.4f}{wi} | eta:{fmt(eta)}")
+                tgt = f" target:≤{target_loss}" if target_loss > 0 else ""
+                print(f"{phase_label}Epoch {epoch+1} | {i+1}/{total_steps} ({pct:.0f}%) | loss:{loss.item():.4f}{wi}{tgt} | eta:{fmt(eta)}")
 
         if stop_training: break
 
@@ -1015,6 +1078,11 @@ def _run_one_phase_cpu(model, optimizer, scheduler, loss_fn, loader, cfg,
         if SERVER_URL: flush_worker_grads(model, optimizer)
         if avg < run_best_loss: run_best_loss = avg
 
+        # ── Check if this phase's target loss is reached ──
+        if target_loss > 0 and avg <= target_loss:
+            print(f"  ✓ {phase_label}Target loss reached ({avg:.4f} ≤ {target_loss}) — phase complete!")
+            phase_done = True
+
         msg = f"{phase_label}Epoch {epoch+1}/{EPOCHS} loss:{avg:.4f} took:{fmt(ep_time)} eta:{fmt(eta_tot)}"
         print(msg)
         push_stats(epoch+1, EPOCHS, avg, scheduler.get_last_lr()[0],
@@ -1027,7 +1095,117 @@ def _run_one_phase_cpu(model, optimizer, scheduler, loss_fn, loader, cfg,
             force_push_now("tokenizer.json")
         delete_mid_epoch()
 
+        if phase_done: break
+
     return run_best_loss, last_epoch, stop_training
+
+
+# ═══════════════════════════════════════════════════
+#   GENERALIZATION PASS
+#   Runs after a phase hits ≤ 0.50 loss.
+#   Trains briefly on rephrased Q&A + unseen data so
+#   the model learns to understand rather than recite.
+#
+#   What it does:
+#     1. Takes Q&A pairs from the trained window
+#     2. Rephrases questions 5 different ways (same answer)
+#     3. Adds samples from OUTSIDE the current window (unseen)
+#     4. Shuffles everything and trains for ~200 steps at low LR
+#   Result: model stops pattern-matching word-for-word and starts
+#   generalizing to different phrasings of the same concept.
+# ═══════════════════════════════════════════════════
+
+import random as _random
+
+def _rephrase_pair(text):
+    """Rewrite a Q&A pair using a different template."""
+    lines = text.strip().split("\n")
+    q, a = "", ""
+    for ln in lines:
+        if ln.lower().startswith("question:"): q = ln[9:].strip()
+        elif ln.lower().startswith("answer:"):  a = ln[7:].strip()
+    if not q or not a:
+        return text
+    templates = [
+        f"Q: {q}\nA: {a}",
+        f"Tell me: {q}\n{a}",
+        f"{q}\nAnswer: {a}",
+        f"Question — {q}\nReply — {a}",
+        f"User: {q}\nAssistant: {a}",
+    ]
+    return _random.choice(templates)
+
+def run_generalization_pass(model, optimizer, loss_fn, tok, big_text,
+                            current_chars, device, cfg, n_steps=300):
+    """
+    Short anti-memorization pass after a phase completes.
+    Returns avg loss of the pass (informational only).
+    """
+    print(f"\n  [generalization] Anti-memorization pass ({n_steps} steps)...")
+    model.train()
+
+    window   = big_text[:current_chars]
+    all_text = big_text
+
+    # Extract Q&A pairs from trained window
+    pairs = [p.strip() for p in window.split("\n\n")
+             if "Question:" in p and "Answer:" in p]
+
+    if not pairs:
+        print("  [generalization] No Q&A pairs found — skipping")
+        return float("inf")
+
+    # Build pool: rephrased known + unseen data
+    rephrased = [_rephrase_pair(p) for p in pairs]
+
+    pool = list(rephrased)
+    if current_chars < len(all_text):
+        outside_text = all_text[current_chars:]
+        outside_pairs = [p.strip() for p in outside_text.split("\n\n")
+                         if "Question:" in p and "Answer:" in p]
+        # 70% rephrased + 30% unseen
+        n_out = max(10, len(outside_pairs) // 3)
+        pool += outside_pairs[:n_out]
+
+    _random.shuffle(pool)
+
+    seq_len = cfg.seq_len
+    # Use a lower LR for the generalization pass to avoid catastrophic forgetting
+    gen_optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
+
+    total_loss = 0.0; done = 0; step = 0
+    while step < n_steps and pool:
+        # Grab a mini-batch of 4 pairs
+        batch_texts = [pool[(step + k) % len(pool)] for k in range(4)]
+        step += 4
+
+        ids_batch = []
+        for t in batch_texts:
+            ids = tok.encode(t)
+            for i in range(0, len(ids) - seq_len, seq_len // 2):
+                chunk = ids[i:i + seq_len + 1]
+                if len(chunk) == seq_len + 1:
+                    ids_batch.append(chunk)
+        if not ids_batch:
+            continue
+
+        _random.shuffle(ids_batch)
+        batch_t = torch.tensor(ids_batch[:8], dtype=torch.long).to(device)
+        x, y   = batch_t[:, :-1], batch_t[:, 1:]
+
+        gen_optimizer.zero_grad()
+        logits = model(x)
+        loss   = loss_fn(logits.reshape(-1, cfg.vocab_size), y.reshape(-1))
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        gen_optimizer.step()
+
+        total_loss += loss.item(); done += 1
+
+    avg = total_loss / max(done, 1)
+    print(f"  [generalization] Done — avg loss: {avg:.4f}  ({done} mini-steps, "
+          f"{len(pool)} pairs in pool)")
+    return avg
 
 
 def train_cpu(tok, big_text, data_hash, resume_checkpoint, is_mid_epoch):
@@ -1041,23 +1219,12 @@ def train_cpu(tok, big_text, data_hash, resume_checkpoint, is_mid_epoch):
     current_chars = get_or_ask_budget(total_chars)
     budget_max    = get_budget_max(total_chars)
 
-    # ── Phase training setup ───────────────────────
-    phase_state = get_phase_config(budget_max)
-    using_phases = phase_state is not None
-
-    if using_phases:
-        ph_size    = phase_state["phase_size"]
-        ph_total   = phase_state["total_phases"]
-        ph_current = phase_state["current_phase"]
-        ph_done    = phase_state["chars_done"]
-        print(f"\n  Phase training: {format_size(ph_size)} × {ph_total} phases")
-        print(f"  Progress: phase {ph_current+1}/{ph_total}  "
-              f"({format_size(ph_done)}/{format_size(budget_max)} done)")
-    else:
-        loader, use_n = _make_loader_cpu(full_dataset, current_chars, total_chars, cpu_batch)
-        total_steps   = len(loader)
-        print(f"  Slice: {format_size(current_chars)} / {format_size(budget_max)} chars "
-              f"→ {use_n:,} sequences")
+    # ── Phase training setup (always enabled) ─────
+    phase_state  = get_phase_config(budget_max)
+    ph_size      = phase_state["phase_size"]
+    ph_total     = phase_state["total_phases"]
+    ph_current   = phase_state["current_phase"]
+    ph_done      = phase_state["chars_done"]
 
     # ── Model setup ────────────────────────────────
     cfg = Config(); cfg.vocab_size = tok.vocab_size
@@ -1088,84 +1255,85 @@ def train_cpu(tok, big_text, data_hash, resume_checkpoint, is_mid_epoch):
     t0 = time.time(); epoch_times = []; last_epoch = actual_start
 
     # ══════════════════════════════════════════════
-    #   PHASE TRAINING LOOP
+    #   CUMULATIVE PHASE TRAINING LOOP
+    #   Phase N trains on N×100k chars (all previous + new chunk).
+    #   Must reach ≤ 0.50 loss before phase N+1 starts.
     # ══════════════════════════════════════════════
-    if using_phases:
-        chars_done = ph_done
+    chars_done  = ph_done
+    phase_tgt   = phase_state.get("target_loss", TARGET_LOSS_PER_PHASE)
 
-        for phase_idx in range(ph_current, ph_total):
-            if stop_training: break
+    for phase_idx in range(ph_current, ph_total):
+        if stop_training: break
 
-            # How many chars this phase covers
-            phase_chars = min(ph_size, budget_max - chars_done)
-            if phase_chars <= 0: break
+        # Cumulative window: phase 1=100k, phase 2=200k, phase 3=300k ...
+        chars_this_phase = min((phase_idx + 1) * ph_size, budget_max)
+        if chars_this_phase <= 0: break
 
-            label = f"[Phase {phase_idx+1}/{ph_total}] "
-            print(f"\n{'='*50}")
-            print(f"  {label}{format_size(phase_chars)} chars  "
-                  f"(total done after: {format_size(chars_done+phase_chars)}/{format_size(budget_max)})")
-            print(f"{'='*50}")
+        new_added = chars_this_phase - chars_done
+        label = f"[Phase {phase_idx+1}/{ph_total}] "
 
-            loader, use_n = _make_loader_cpu(full_dataset, phase_chars, total_chars, cpu_batch)
-            print(f"  Sequences: {use_n:,}")
+        print(f"\n{'='*62}")
+        print(f"  {label}Window: {format_size(chars_this_phase)} chars total")
+        if phase_idx > 0:
+            print(f"  (keeping {format_size(chars_done)} already learned"
+                  f" + {format_size(new_added)} new chars)")
+        print(f"  Goal: loss ≤ {phase_tgt}  (keeps training until reached)")
+        print(f"{'='*62}")
 
-            # Reset epochs for each phase so we train EPOCHS epochs per phase
-            actual_start_phase = 0
-            scheduler_phase    = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=EPOCHS, last_epoch=-1)
+        loader, use_n = _make_loader_cpu(full_dataset, chars_this_phase, total_chars, cpu_batch)
+        print(f"  Sequences in window: {use_n:,}")
 
-            run_best_loss, last_epoch, stopped = _run_one_phase_cpu(
-                model, optimizer, scheduler_phase, loss_fn, loader, cfg,
-                device, data_hash, run_best_loss,
-                actual_start_phase, 0, t0, epoch_times, phase_label=label)
+        # Fresh cosine LR schedule each phase
+        scheduler_phase = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=EPOCHS, last_epoch=-1)
 
-            chars_done += phase_chars
-
-            # Save phase checkpoint
-            phase_ckpt = f"myai_phase{phase_idx+1}.pt"
-            save_model(model, optimizer, last_epoch+1, cfg, phase_ckpt,
-                       best_loss=run_best_loss, trained_chars=chars_done)
-            save_model(model, optimizer, last_epoch+1, cfg, "myai.pt",
-                       best_loss=run_best_loss, trained_chars=chars_done)
-            force_push_now("tokenizer.json")
-
-            # Update phase state
-            phase_state["current_phase"] = phase_idx + 1
-            phase_state["chars_done"]    = chars_done
-            save_phase_state(phase_state)
-
-            pct = chars_done / budget_max * 100
-            print(f"\n  ✓ Phase {phase_idx+1}/{ph_total} complete — "
-                  f"{format_size(chars_done)}/{format_size(budget_max)} ({pct:.0f}%) | "
-                  f"best loss: {run_best_loss:.4f}")
-
-            if stopped: break
-
-        # All phases done
-        if not stop_training:
-            clear_phase_state()
-            print(f"\n✓ All {ph_total} phases complete!")
-
-        current_chars = chars_done
-
-    # ══════════════════════════════════════════════
-    #   NORMAL TRAINING (no phases)
-    # ══════════════════════════════════════════════
-    else:
-        loader, use_n = _make_loader_cpu(full_dataset, current_chars, total_chars, cpu_batch)
-        run_best_loss, last_epoch, _ = _run_one_phase_cpu(
-            model, optimizer, scheduler, loss_fn, loader, cfg,
+        run_best_loss, last_epoch, stopped = _run_one_phase_cpu(
+            model, optimizer, scheduler_phase, loss_fn, loader, cfg,
             device, data_hash, run_best_loss,
-            actual_start, start_step, t0, epoch_times)
+            0, 0, t0, epoch_times,
+            phase_label=label, target_loss=phase_tgt)
 
-        # Progressive expansion
-        budget_max2 = get_budget_max(total_chars)
-        if PROGRESSIVE and run_best_loss < TARGET_LOSS and current_chars < budget_max2:
-            new_chars = min(int(current_chars * PROGRESSIVE_FACTOR), budget_max2)
-            loader, use_n = _make_loader_cpu(full_dataset, new_chars, total_chars, cpu_batch)
-            print(f"  ↑ Progressive: expanding {format_size(current_chars)} → {format_size(new_chars)}")
-            current_chars = new_chars
-            update_budget_current(current_chars)
+        # ── Generalization pass: prevent recitation, promote understanding ──
+        if run_best_loss <= phase_tgt and not stopped:
+            run_generalization_pass(
+                model, optimizer, loss_fn, tok, big_text,
+                chars_this_phase, device, cfg)
+
+        chars_done = chars_this_phase
+
+        # Save checkpoint for this phase
+        phase_ckpt = f"myai_phase{phase_idx+1}.pt"
+        save_model(model, optimizer, last_epoch+1, cfg, phase_ckpt,
+                   best_loss=run_best_loss, trained_chars=chars_done)
+        save_model(model, optimizer, last_epoch+1, cfg, "myai.pt",
+                   best_loss=run_best_loss, trained_chars=chars_done)
+        force_push_now("tokenizer.json")
+
+        phase_state["current_phase"] = phase_idx + 1
+        phase_state["chars_done"]    = chars_done
+        save_phase_state(phase_state)
+
+        pct    = chars_done / budget_max * 100
+        status = f"✓ loss={run_best_loss:.4f} ≤ {phase_tgt}" if run_best_loss <= phase_tgt \
+                 else f"loss={run_best_loss:.4f} (target {phase_tgt} not yet met)"
+        print(f"\n  Phase {phase_idx+1}/{ph_total} done — "
+              f"{format_size(chars_done)}/{format_size(budget_max)} ({pct:.0f}%) | {status}")
+
+        if not stopped and phase_idx + 1 < ph_total:
+            next_window = min((phase_idx + 2) * ph_size, budget_max)
+            print(f"  Next: expand to {format_size(next_window)} chars "
+                  f"(+{format_size(next_window - chars_done)} new)")
+
+        if stopped: break
+
+    # All phases complete
+    if not stop_training:
+        clear_phase_state()
+        print(f"\n✓ All {ph_total} phases complete!")
+        print(f"  Total trained: {format_size(chars_done)} chars")
+        print(f"  Best loss    : {run_best_loss:.4f}")
+
+    current_chars = chars_done
 
     # ── Final save ─────────────────────────────────
     stop_wg_thread(); stop_sync_watcher()
@@ -1178,16 +1346,12 @@ def train_cpu(tok, big_text, data_hash, resume_checkpoint, is_mid_epoch):
 
     if not stop_training:
         save_training_complete(current_chars, total_chars, run_best_loss, data_hash)
-        asc = load_autoscale()
         print(f"\n✓ Training complete!")
         print(f"  Trained : {format_size(current_chars)} / {format_size(total_chars)} chars")
         print(f"  Best loss: {run_best_loss:.4f}")
-        if asc and asc.get("enabled"):
-            step = asc["step_chars"]
-            nxt  = min(current_chars + step, total_chars)
-            print(f"  Next run will auto-expand to {format_size(nxt)} chars (+{format_size(step)})")
-        else:
-            print(f"  Run again to train more, or use --extend after downloading more data.")
+        print(f"  Run again to continue from next phase, or download more data first.")
+        # Upload all state files so download_results.py can grab everything
+        upload_state_files()
 
     print(f"Done! {fmt(time.time()-t0)}")
 
@@ -1211,7 +1375,11 @@ def train_gpu(rank, world_size, vram_list, resume_checkpoint, data_hash, is_mid_
     if is_main:
         current_chars = get_or_ask_budget(total_chars)
         budget_max    = get_budget_max(total_chars)
-        # broadcast to all ranks
+        # On Kaggle: auto-setup phase training if not already configured
+        if is_kaggle():
+            _ps = load_phase_state()
+            if _ps is None or not _ps.get("enabled"):
+                get_phase_config(budget_max)   # auto-creates Kaggle phase state
         bc = torch.tensor([current_chars, budget_max], dtype=torch.long, device=device)
     else:
         bc = torch.zeros(2, dtype=torch.long, device=device)
@@ -1273,6 +1441,12 @@ def train_gpu(rank, world_size, vram_list, resume_checkpoint, data_hash, is_mid_
             start_wg_thread()
             print(f"Worker blending: ON (blend={WORKER_GRAD_BLEND})")
         print()
+
+    # Load phase target loss (GPU reads it from the file saved by main process)
+    _ps = load_phase_state()
+    phase_target_loss = _ps.get("target_loss", TARGET_LOSS_PER_PHASE) if _ps and _ps.get("enabled") else 0.0
+    if is_main and phase_target_loss > 0:
+        print(f"  Phase target loss: ≤ {phase_target_loss} (stops early when reached)")
 
     t0 = time.time(); epoch_times = []; last_epoch = actual_start; w_applies = 0
 
@@ -1349,6 +1523,11 @@ def train_gpu(rank, world_size, vram_list, resume_checkpoint, data_hash, is_mid_
             if SERVER_URL: flush_worker_grads(model.module, optimizer)
             if avg < run_best_loss: run_best_loss = avg
 
+            # ── Phase target loss check ────────────────────────────────────
+            if phase_target_loss > 0 and avg <= phase_target_loss:
+                print(f"  ✓ Target loss reached ({avg:.4f} ≤ {phase_target_loss}) — phase complete!")
+                stop_training = True   # signal all ranks to stop this phase
+
             msg = (f"Epoch {epoch+1}/{EPOCHS} loss:{avg:.4f} "
                    f"lr:{scheduler.get_last_lr()[0]:.6f} "
                    f"took:{fmt(ep_time)} eta:{fmt(eta_tot)}")
@@ -1400,6 +1579,7 @@ def train_gpu(rank, world_size, vram_list, resume_checkpoint, data_hash, is_mid_
                 print(f"  Next run will auto-expand to {format_size(nxt)} chars (+{format_size(step)})")
             else:
                 print(f"  Run again to train more chars, or run with --extend to add downloaded data.")
+            upload_state_files()
         print(f"Done! {fmt(time.time()-t0)}")
 
     dist.destroy_process_group()

@@ -439,6 +439,38 @@
         <div class="hint">Floor — every worker gets at least this many</div>
       </div>
     </div>
+
+    <!-- CPU sharing section -->
+    <div style="margin-top:20px; padding-top:16px; border-top:1px solid #1e1e3a;">
+      <div style="color:#a5b4fc; font-size:0.72rem; text-transform:uppercase; letter-spacing:1px; margin-bottom:14px;">
+        CPU Sharing — require workers to donate CPU threads
+      </div>
+      <div style="color:#777; font-size:0.82rem; line-height:1.6; margin-bottom:14px;">
+        When enabled, every worker.py that connects will set PyTorch to use the specified
+        number of CPU threads <i>in addition to</i> their GPU. This helps unblock the server
+        CPU bottleneck — useful when Kaggle's GPU is fast but batch prep is the bottleneck.
+        Workers are notified live via heartbeat, no restart needed.
+      </div>
+      <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div class="toggle-switch" id="admin-cpu-toggle" onclick="toggleAdminCPU()" style="flex-shrink:0">
+            <div class="toggle-knob"></div>
+          </div>
+          <span style="color:#888; font-size:0.85rem;" id="admin-cpu-label">CPU sharing: OFF</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; flex:1; min-width:200px;">
+          <span style="color:#555; font-size:0.8rem; white-space:nowrap;">Threads per worker:</span>
+          <input type="range" min="1" max="16" value="2" id="cfg-cpu-threads"
+                 oninput="document.getElementById('cpu-threads-val').textContent=this.value"
+                 style="flex:1; accent-color:#7c6af7;">
+          <span id="cpu-threads-val" style="color:#7c6af7; font-size:0.85rem; min-width:20px;">2</span>
+        </div>
+      </div>
+      <div style="color:#444; font-size:0.75rem; margin-top:10px;">
+        ⚠ Each CPU thread per worker reduces the server's available threads for batch prep.
+        Start at 1–2 threads. Raise only if the bottleneck indicator shows >90% CPU.
+      </div>
+    </div>
     <div class="admin-actions">
       <button class="btn-sm" onclick="adminSave()">Save changes</button>
       <span class="admin-saved" id="admin-saved">✓ Saved — caps updated live</span>
@@ -911,11 +943,41 @@ async function loadAdminConfig() {
     document.getElementById("cfg-max-vram").value         = d.max_vram_pct
     document.getElementById("cfg-bytes-per-sample").value = d.bytes_per_sample
     document.getElementById("cfg-min-batch").value        = d.min_batch
+
+    // CPU sharing
+    const cpuOn = d.allow_cpu_share || false
+    const threads = d.cpu_threads || 2
+    document.getElementById("cfg-cpu-threads").value    = threads
+    document.getElementById("cpu-threads-val").textContent = threads
+    const tog = document.getElementById("admin-cpu-toggle")
+    const lbl = document.getElementById("admin-cpu-label")
+    if (cpuOn) {
+      tog.classList.add("on")
+      lbl.textContent = `CPU sharing: ON (${threads} thread${threads>1?'s':''}/worker)`
+    } else {
+      tog.classList.remove("on")
+      lbl.textContent = "CPU sharing: OFF"
+    }
   } catch(e) {}
+}
+
+function toggleAdminCPU() {
+  const tog = document.getElementById("admin-cpu-toggle")
+  const lbl = document.getElementById("admin-cpu-label")
+  const on  = tog.classList.toggle("on")
+  const threads = parseInt(document.getElementById("cfg-cpu-threads").value)
+  lbl.textContent = on ? `CPU sharing: ON (${threads} thread${threads>1?'s':''}/worker)` : "CPU sharing: OFF"
+  document.getElementById("cfg-cpu-threads").oninput = () => {
+    const t = parseInt(document.getElementById("cfg-cpu-threads").value)
+    document.getElementById("cpu-threads-val").textContent = t
+    if (tog.classList.contains("on"))
+      lbl.textContent = `CPU sharing: ON (${t} thread${t>1?'s':''}/worker)`
+  }
 }
 
 async function adminSave() {
   if (!adminKey) return
+  const cpuOn = document.getElementById("admin-cpu-toggle").classList.contains("on")
   const r = await fetch(`${SERVER}/config`, {
     method: "POST",
     headers: {"Content-Type": "application/json", "X-Secret-Key": adminKey},
@@ -924,6 +986,8 @@ async function adminSave() {
       max_vram_pct:     parseFloat(document.getElementById("cfg-max-vram").value),
       bytes_per_sample: parseInt(document.getElementById("cfg-bytes-per-sample").value),
       min_batch:        parseInt(document.getElementById("cfg-min-batch").value),
+      allow_cpu_share:  cpuOn,
+      cpu_threads:      parseInt(document.getElementById("cfg-cpu-threads").value),
     })
   })
   if (r.ok) {

@@ -305,12 +305,72 @@ def has_training_data():
     ok = os.path.exists("training_data.txt.gz")
     return jsonify({"ok": ok})
 
+# ── Generic file download (state files, dot files, epoch ckpts) ──────────────
+
+# Files allowed to be served via /file/<name>
+# Covers both dot and plain versions of every state file.
+_ALLOWED_FILES = {
+    # state files — dot and plain versions
+    ".best_loss", "best_loss",
+    ".data_hash", "data_hash",
+    ".training_budget.json",  "training_budget.json",
+    ".phase_state.json",      "phase_state.json",
+    ".training_complete.json","training_complete.json",
+    ".autoscale.json",        "autoscale.json",
+}
+
+@app.route("/file/<path:filename>", methods=["GET"])
+def serve_file(filename):
+    """Serve any allowed state file or myai_epochN.pt checkpoint."""
+    # Allow epoch checkpoints dynamically
+    import re as _re
+    is_epoch_ckpt = bool(_re.match(r'^myai_epoch\d+\.pt$', filename))
+    if filename not in _ALLOWED_FILES and not is_epoch_ckpt:
+        return "Not allowed", 403
+    if not os.path.exists(filename):
+        return "Not found", 404
+    # Serve as binary for .pt files, text for everything else
+    if filename.endswith(".pt"):
+        with open(filename, "rb") as f:
+            return f.read(), 200, {"Content-Type": "application/octet-stream"}
+    else:
+        with open(filename, "r", errors="replace") as f:
+            return f.read(), 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+@app.route("/file/<path:filename>", methods=["POST"])
+def receive_file(filename):
+    """Receive a state file upload from train.py."""
+    if request.headers.get("X-Secret-Key") != SECRET_KEY:
+        return "Unauthorized", 401
+    import re as _re
+    is_epoch_ckpt = bool(_re.match(r'^myai_epoch\d+\.pt$', filename))
+    if filename not in _ALLOWED_FILES and not is_epoch_ckpt:
+        return "Not allowed", 403
+    try:
+        with open(filename, "wb") as f:
+            f.write(request.data)
+        print(f"File received: {filename} ({len(request.data)/1024:.0f} KB)")
+        return jsonify({"status": "ok", "filename": filename})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/latest_epoch_ckpt", methods=["GET"])
+def latest_epoch_ckpt():
+    """Returns the filename of the highest-numbered myai_epochN.pt on disk."""
+    import re as _re, glob as _glob
+    if request.headers.get("X-Secret-Key") != SECRET_KEY:
+        return "Unauthorized", 401
+    ckpts = sorted(
+        [f for f in _glob.glob("myai_epoch*.pt")
+         if _re.match(r'^myai_epoch\d+\.pt$', f)],
+        key=lambda f: int(_re.search(r'\d+', f).group())
+    )
+    if not ckpts:
+        return jsonify({"filename": None, "found": False})
+    return jsonify({"filename": ckpts[-1], "found": True})
+
 # ── Cached tokenizer word2id for get_batch ────────
 _tok_cache = {}
-
-# ── Cached decompressed training text (avoid re-reading .gz every request) ──
-_text_cache      = ""
-_text_cache_mtime = 0.0
 
 def _get_tok():
     global _tok_cache
@@ -324,19 +384,6 @@ def _get_tok():
         except Exception:
             pass
     return _tok_cache
-
-def _get_text():
-    """Return cached decompressed training text, reload only if file changed."""
-    global _text_cache, _text_cache_mtime
-    try:
-        mtime = os.path.getmtime("training_data.txt.gz")
-        if mtime != _text_cache_mtime:
-            with gzip.open("training_data.txt.gz", "rt", encoding="utf-8") as f:
-                _text_cache = f.read()
-            _text_cache_mtime = mtime
-    except Exception:
-        pass
-    return _text_cache
 
 def _tok_encode(text, word2id, seq_len=128):
     """Tokenize a string using the real word2id vocab."""
@@ -362,7 +409,7 @@ def get_batch():
     seq_len  = 128
     word2id  = _get_tok()
 
-    # Reload tokenizer if it changed on disk
+    # Reload tokenizer if it changed on disk (tokenizer.json updated)
     global _tok_cache
     try:
         mtime = os.path.getmtime("tokenizer.json")
@@ -373,19 +420,22 @@ def get_batch():
     except Exception:
         pass
 
-    # Use cached text — avoids decompressing the full .gz on every request
-    text = _get_text()
-    if not text:
+    try:
+        with gzip.open("training_data.txt.gz", "rt", encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
         return "", 204
 
     # Pick a random chunk of text large enough to yield `size` sequences
-    chunk_chars = size * seq_len * 6
+    chunk_chars = size * seq_len * 6   # rough estimate: ~6 chars per token
     start = random.randint(0, max(0, len(text) - chunk_chars))
     chunk = text[start : start + chunk_chars]
 
     if word2id:
+        # Use the real tokenizer
         all_chunks = _tok_encode(chunk, word2id, seq_len)
     else:
+        # Fallback if tokenizer not available yet: character ordinals mod vocab
         all_chunks = []
         for i in range(0, min(len(chunk), size * seq_len), seq_len):
             row = [ord(c) % 5000 for c in chunk[i:i + seq_len + 1]]
@@ -408,32 +458,15 @@ def upload_training_data():
 #   GRADIENT ROUTES
 # ═══════════════════════════════════════════════════
 
-_grad_last_seen = {}   # worker_id → last submit timestamp (rate limit)
-_GRAD_MIN_INTERVAL = 2.0   # seconds between gradient submits per worker
-
 @app.route("/submit_gradients", methods=["POST"])
 def submit_gradients():
-    data      = request.json
-    worker_id = data.get("worker_id", "unknown")
-
-    # Rate limit: reject if worker submitted too recently
-    now = time.time()
+    data = request.json
     with gradient_lock:
-        last = _grad_last_seen.get(worker_id, 0)
-        if now - last < _GRAD_MIN_INTERVAL:
-            return jsonify({"status": "rate_limited"}), 429
-        _grad_last_seen[worker_id] = now
-
-        # Cap gradient buffer size to avoid RAM explosion
-        if len(gradient_buffer.get("losses", [])) > 500:
-            return jsonify({"status": "buffer_full"}), 429
-
         gradient_buffer["losses"].append(data["loss"])
         for name, grad in data["grads"].items():
             gradient_buffer[name].append(grad)
-
-    print(f"Gradients from {worker_id[:8]} | loss:{data['loss']:.4f}")
-    return jsonify({"status": "ok"})
+    print(f"Gradients from {data['worker_id'][:8]} | loss:{data['loss']:.4f}")
+    return jsonify({"status":"ok"})
 
 @app.route("/get_gradients", methods=["GET"])
 def get_gradients():
