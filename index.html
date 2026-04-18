@@ -291,16 +291,30 @@
         <div class="training-stat-val" id="ts-epoch">—</div>
       </div>
       <div class="training-stat">
+        <div class="training-stat-label">Step</div>
+        <div class="training-stat-val" id="ts-step" style="font-size:0.85rem">—</div>
+      </div>
+      <div class="training-stat">
         <div class="training-stat-label">Loss</div>
         <div class="training-stat-val" id="ts-loss">—</div>
       </div>
       <div class="training-stat">
-        <div class="training-stat-label">Learning rate</div>
+        <div class="training-stat-label">LR</div>
         <div class="training-stat-val" id="ts-lr">—</div>
       </div>
+    </div>
+    <div class="training-row" style="margin-top:-4px">
       <div class="training-stat">
-        <div class="training-stat-label">ETA</div>
-        <div class="training-stat-val" id="ts-eta">—</div>
+        <div class="training-stat-label">Epoch ETA</div>
+        <div class="training-stat-val" id="ts-epoch-eta">—</div>
+      </div>
+      <div class="training-stat">
+        <div class="training-stat-label">Total ETA</div>
+        <div class="training-stat-val" id="ts-total-eta">—</div>
+      </div>
+      <div class="training-stat">
+        <div class="training-stat-label">Elapsed</div>
+        <div class="training-stat-val" id="ts-elapsed">—</div>
       </div>
     </div>
     <div class="training-progress"><div class="training-progress-bar" id="ts-progress"></div></div>
@@ -523,12 +537,57 @@ async function updateTrainingPanel() {
         s.loss > 0 ? s.loss.toFixed(4) : "—"
       document.getElementById("ts-lr").textContent =
         s.lr > 0 ? s.lr.toExponential(2) : "—"
-      document.getElementById("ts-eta").textContent =
-        online ? fmtTime(s.eta) : "—"
 
-      // Progress bar
+      // Step within epoch (e.g.  "710 / 1283")
+      if (s.step > 0 && s.total_steps > 0) {
+        document.getElementById("ts-step").textContent = `${s.step} / ${s.total_steps}`
+      }
+
+      // Elapsed
+      if (s.elapsed > 0) {
+        document.getElementById("ts-elapsed").textContent = fmtTime(s.elapsed)
+      }
+
+      if (online) {
+        // Epoch ETA — server sends this as `eta` during micro-step updates
+        // (= time until THIS epoch finishes)
+        if (s.step > 0 && s.total_steps > 0 && s.elapsed > 0) {
+          const epochDone   = s.step / s.total_steps          // fraction of epoch done
+          const epochElapsed = s.elapsed % (s.elapsed / Math.max(s.epoch, 1))  // rough epoch time
+          // Better: use ratio of step progress
+          const stepsLeft   = s.total_steps - s.step
+          const timePerStep = s.eta / Math.max(stepsLeft, 1)  // eta IS epoch eta from server
+          document.getElementById("ts-epoch-eta").textContent = fmtTime(s.eta)
+        } else {
+          document.getElementById("ts-epoch-eta").textContent = fmtTime(s.eta)
+        }
+
+        // Total ETA — compute from elapsed + epoch progress
+        // avg_epoch_time = elapsed / epochs_done → remaining = avg * epochs_left
+        if (s.epoch > 0 && s.total_epochs > 0 && s.elapsed > 0) {
+          const avgEpoch   = s.elapsed / s.epoch
+          const epochsLeft = s.total_epochs - s.epoch
+          // Add remaining fraction of current epoch
+          const epochFrac  = (s.step > 0 && s.total_steps > 0)
+            ? (s.total_steps - s.step) / s.total_steps
+            : 0
+          const totalEta   = avgEpoch * epochsLeft + avgEpoch * epochFrac
+          document.getElementById("ts-total-eta").textContent = fmtTime(totalEta)
+        } else {
+          document.getElementById("ts-total-eta").textContent = "—"
+        }
+      } else {
+        document.getElementById("ts-epoch-eta").textContent = "—"
+        document.getElementById("ts-total-eta").textContent = "—"
+      }
+
+      // Progress bar (epoch-level)
       if (s.total_epochs > 0) {
-        const pct = Math.min(100, (s.epoch / s.total_epochs) * 100)
+        const epochPct  = s.epoch / s.total_epochs
+        const stepBonus = (s.step > 0 && s.total_steps > 0)
+          ? (s.step / s.total_steps) / s.total_epochs   // fractional progress within epoch
+          : 0
+        const pct = Math.min(100, (epochPct + stepBonus) * 100)
         document.getElementById("ts-progress").style.width = pct + "%"
       }
     }

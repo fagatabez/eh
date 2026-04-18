@@ -74,12 +74,14 @@ class _Attn(nn.Module):
 class _Block(nn.Module):
     def __init__(self,c):
         super().__init__()
-        self.a=_Attn(c)
+        # Names MUST match model.py exactly — attn/norm1/norm2
+        # (old worker used a/n1/n2 which caused weight load failure)
+        self.attn=_Attn(c)
         self.ff=nn.Sequential(nn.Linear(c.embed_dim,4*c.embed_dim),nn.GELU(),
                                nn.Linear(4*c.embed_dim,c.embed_dim),nn.Dropout(c.dropout))
-        self.n1=nn.LayerNorm(c.embed_dim); self.n2=nn.LayerNorm(c.embed_dim)
+        self.norm1=nn.LayerNorm(c.embed_dim); self.norm2=nn.LayerNorm(c.embed_dim)
     def forward(self,x):
-        return x+self.ff(self.n2(x+self.a(self.n1(x))))
+        return x+self.ff(self.norm2(x+self.attn(self.norm1(x))))
 
 class _Model(nn.Module):
     def __init__(self,c):
@@ -99,13 +101,78 @@ class _Model(nn.Module):
 #   HELPERS
 # ═══════════════════════════════════════════════════
 
+def _wmic_gpu_name():
+    """Read GPU name from Windows WMI (works for AMD/Intel iGPU)."""
+    if os.name != 'nt':
+        return None
+    try:
+        r = subprocess.run(
+            'wmic path win32_VideoController get Name /format:value',
+            capture_output=True, text=True, shell=True, timeout=5)
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Name=") and line[5:].strip():
+                return line[5:].strip()
+    except Exception:
+        pass
+    return None
+
+def _try_directml():
+    """
+    Try to get a DirectML device (AMD / Intel iGPU on Windows).
+    Returns (device, name, vram_gb) or (None, None, 0).
+    Install with:  pip install torch-directml
+    """
+    try:
+        import torch_directml as dml
+        dev  = dml.device()
+        # Try to get name; some versions expose device_name()
+        name = dml.device_name(dml.default_device()) if hasattr(dml, 'device_name') else "DirectML GPU"
+        # Shared memory: use psutil to estimate free RAM as usable "VRAM"
+        try:
+            import psutil
+            free_gb = psutil.virtual_memory().available / 1024**3
+            vram_gb = round(min(free_gb * 0.7, 8.0), 1)  # use up to 70% of free RAM
+        except ImportError:
+            vram_gb = 2.0   # safe default
+        return dev, name, vram_gb
+    except (ImportError, Exception):
+        return None, None, 0.0
+
 def get_vram():
     if torch.cuda.is_available():
-        return torch.cuda.get_device_properties(0).total_memory/1024**3
+        return torch.cuda.get_device_properties(0).total_memory / 1024**3
+    dml_dev, _, dml_vram = _try_directml()
+    if dml_dev is not None:
+        return dml_vram
     return 0.0
 
 def get_gpu_name():
-    return torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+    if torch.cuda.is_available():
+        return torch.cuda.get_device_name(0)
+    _, dml_name, dml_vram = _try_directml()
+    if dml_name:
+        return dml_name
+    # Last resort: wmic (shows AMD/Intel iGPU even without driver support)
+    wmic_name = _wmic_gpu_name()
+    return wmic_name or "CPU"
+
+def get_device_and_info():
+    """
+    Returns (device, gpu_name, vram_gb, device_label).
+    Priority: NVIDIA CUDA > AMD/Intel DirectML > CPU
+    """
+    if torch.cuda.is_available():
+        name   = torch.cuda.get_device_name(0)
+        vram   = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        return torch.device("cuda"), name, vram, "cuda"
+
+    dml_dev, dml_name, dml_vram = _try_directml()
+    if dml_dev is not None:
+        return dml_dev, dml_name, dml_vram, "directml"
+
+    wmic_name = _wmic_gpu_name() or "CPU"
+    return torch.device("cpu"), wmic_name, 0.0, "cpu"
 
 def fmt(s):
     if s<60: return f"{int(s)}s"
@@ -176,14 +243,21 @@ def download_model_weights(model, device):
 # ═══════════════════════════════════════════════════
 
 def main():
-    vram_gb   = get_vram()
-    device    = torch.device("cuda" if vram_gb > 0 else "cpu")
+    device, gpu_name, vram_gb, device_label = get_device_and_info()
     worker_id = str(uuid.uuid4())
 
     print("="*54)
     print("  MyAI Worker  —  real GPU contribution")
-    print(f"  Device : {device} | {get_gpu_name()}")
-    print(f"  VRAM   : {vram_gb:.1f} GB")
+    print(f"  Device : {device_label} | {gpu_name}")
+    print(f"  VRAM   : {vram_gb:.1f} GB" + (
+        "  [shared/estimated]" if device_label == "directml" else
+        "  [system RAM used]"  if device_label == "cpu"       else ""))
+    if device_label == "directml":
+        print("  ✓ AMD/Intel iGPU via DirectML")
+    elif device_label == "cpu" and gpu_name not in ("CPU", ""):
+        print(f"  ⚠ GPU detected ({gpu_name}) but no driver support.")
+        print("    Install DirectML for GPU acceleration:")
+        print("      pip install torch-directml")
     print("="*54)
     print(f"Connecting to {SERVER_URL} ...")
 
@@ -191,7 +265,7 @@ def main():
     try:
         resp = requests.post(f"{SERVER_URL}/join", json={
             "worker_id": worker_id, "vram_gb": vram_gb,
-            "gpu_name": get_gpu_name(), "type": "script",
+            "gpu_name": gpu_name, "type": "script",
         }, timeout=10).json()
     except Exception as e:
         print(f"Cannot connect: {e}"); return
@@ -298,7 +372,8 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
     loss_fn   = nn.CrossEntropyLoss(ignore_index=0)
-    scaler    = torch.cuda.amp.GradScaler() if device.type=="cuda" else None
+    # AMP only works on NVIDIA CUDA — not DirectML or CPU
+    scaler    = torch.cuda.amp.GradScaler() if device_label == "cuda" else None
 
     # Live config (updated by heartbeat)
     live = {"batch": batch_size, "min_batch": min_batch}
@@ -314,7 +389,7 @@ def main():
                     # Server restarted — rejoin
                     rj = requests.post(f"{SERVER_URL}/join", json={
                         "worker_id": worker_id, "vram_gb": vram_gb,
-                        "gpu_name": get_gpu_name(), "type": "script",
+                        "gpu_name": gpu_name, "type": "script",
                     }, timeout=10).json()
                     live["batch"] = max(live["min_batch"],
                         min(rj.get("batch", live["batch"]), safe))
