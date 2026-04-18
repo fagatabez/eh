@@ -33,8 +33,14 @@ def _load_config():
     return dict(DEFAULTS)
 
 def _save_config():
-    json.dump({k: globals()[k.upper()] if k.upper() in globals() else globals()[k]
-               for k in DEFAULTS}, open(CONFIG_FILE, "w"))
+    json.dump({
+        "total_batch":      TOTAL_BATCH,
+        "max_vram_pct":     MAX_VRAM_PCT,
+        "bytes_per_sample": BYTES_PER_SAMPLE,
+        "min_batch":        MIN_BATCH,
+        "allow_cpu_share":  ALLOW_CPU_SHARE,
+        "cpu_threads":      CPU_THREADS,
+    }, open(CONFIG_FILE, "w"))
 
 _cfg             = _load_config()
 TOTAL_BATCH      = _cfg["total_batch"]
@@ -302,6 +308,10 @@ def has_training_data():
 # ── Cached tokenizer word2id for get_batch ────────
 _tok_cache = {}
 
+# ── Cached decompressed training text (avoid re-reading .gz every request) ──
+_text_cache      = ""
+_text_cache_mtime = 0.0
+
 def _get_tok():
     global _tok_cache
     if _tok_cache:
@@ -314,6 +324,19 @@ def _get_tok():
         except Exception:
             pass
     return _tok_cache
+
+def _get_text():
+    """Return cached decompressed training text, reload only if file changed."""
+    global _text_cache, _text_cache_mtime
+    try:
+        mtime = os.path.getmtime("training_data.txt.gz")
+        if mtime != _text_cache_mtime:
+            with gzip.open("training_data.txt.gz", "rt", encoding="utf-8") as f:
+                _text_cache = f.read()
+            _text_cache_mtime = mtime
+    except Exception:
+        pass
+    return _text_cache
 
 def _tok_encode(text, word2id, seq_len=128):
     """Tokenize a string using the real word2id vocab."""
@@ -339,7 +362,7 @@ def get_batch():
     seq_len  = 128
     word2id  = _get_tok()
 
-    # Reload tokenizer if it changed on disk (tokenizer.json updated)
+    # Reload tokenizer if it changed on disk
     global _tok_cache
     try:
         mtime = os.path.getmtime("tokenizer.json")
@@ -350,22 +373,19 @@ def get_batch():
     except Exception:
         pass
 
-    try:
-        with gzip.open("training_data.txt.gz", "rt", encoding="utf-8") as f:
-            text = f.read()
-    except Exception:
+    # Use cached text — avoids decompressing the full .gz on every request
+    text = _get_text()
+    if not text:
         return "", 204
 
     # Pick a random chunk of text large enough to yield `size` sequences
-    chunk_chars = size * seq_len * 6   # rough estimate: ~6 chars per token
+    chunk_chars = size * seq_len * 6
     start = random.randint(0, max(0, len(text) - chunk_chars))
     chunk = text[start : start + chunk_chars]
 
     if word2id:
-        # Use the real tokenizer
         all_chunks = _tok_encode(chunk, word2id, seq_len)
     else:
-        # Fallback if tokenizer not available yet: character ordinals mod vocab
         all_chunks = []
         for i in range(0, min(len(chunk), size * seq_len), seq_len):
             row = [ord(c) % 5000 for c in chunk[i:i + seq_len + 1]]
@@ -388,15 +408,32 @@ def upload_training_data():
 #   GRADIENT ROUTES
 # ═══════════════════════════════════════════════════
 
+_grad_last_seen = {}   # worker_id → last submit timestamp (rate limit)
+_GRAD_MIN_INTERVAL = 2.0   # seconds between gradient submits per worker
+
 @app.route("/submit_gradients", methods=["POST"])
 def submit_gradients():
-    data = request.json
+    data      = request.json
+    worker_id = data.get("worker_id", "unknown")
+
+    # Rate limit: reject if worker submitted too recently
+    now = time.time()
     with gradient_lock:
+        last = _grad_last_seen.get(worker_id, 0)
+        if now - last < _GRAD_MIN_INTERVAL:
+            return jsonify({"status": "rate_limited"}), 429
+        _grad_last_seen[worker_id] = now
+
+        # Cap gradient buffer size to avoid RAM explosion
+        if len(gradient_buffer.get("losses", [])) > 500:
+            return jsonify({"status": "buffer_full"}), 429
+
         gradient_buffer["losses"].append(data["loss"])
         for name, grad in data["grads"].items():
             gradient_buffer[name].append(grad)
-    print(f"Gradients from {data['worker_id'][:8]} | loss:{data['loss']:.4f}")
-    return jsonify({"status":"ok"})
+
+    print(f"Gradients from {worker_id[:8]} | loss:{data['loss']:.4f}")
+    return jsonify({"status": "ok"})
 
 @app.route("/get_gradients", methods=["GET"])
 def get_gradients():

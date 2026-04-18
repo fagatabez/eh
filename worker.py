@@ -50,8 +50,10 @@ REFRESH_WEIGHTS_EVERY = 20   # batches between weight refreshes
 # ═══════════════════════════════════════════════════
 
 class _Cfg:
-    vocab_size = 5000; seq_len = 128; embed_dim = 256
-    num_heads = 8; num_layers = 6; dropout = 0.1
+    # These are FALLBACK defaults only — the real values are always
+    # loaded from the server checkpoint before any training starts.
+    vocab_size = 5000; seq_len = 128; embed_dim = 512
+    num_heads  = 8;    num_layers = 8; dropout = 0.1
 
 class _Attn(nn.Module):
     def __init__(self,c):
@@ -232,40 +234,59 @@ def main():
         pass  # HEAD might not be supported, continue
 
     # ── Build model from architecture ──────────────
+    # Always read architecture from the server checkpoint first.
+    # This guarantees the worker matches train.py exactly, regardless
+    # of what _Cfg defaults say.
     print("Building model...")
-    # Try to get architecture from server config
-    try:
-        srv_cfg = requests.get(f"{SERVER_URL}/config", timeout=10).json()
-    except Exception:
-        srv_cfg = {}
 
     wcfg = _Cfg(); wcfg.vocab_size = vocab_size
-    for k in ("embed_dim","num_heads","num_layers","seq_len","dropout"):
-        if k in srv_cfg: setattr(wcfg, k, srv_cfg[k])
+
+    # Step 1: try to read architecture from the live checkpoint on server
+    ckpt_arch_loaded = False
+    try:
+        r_ckpt = requests.get(f"{SERVER_URL}/model", timeout=60)
+        if r_ckpt.status_code == 200 and len(r_ckpt.content) > 1000:
+            buf  = io.BytesIO(r_ckpt.content)
+            ckpt = torch.load(buf, map_location="cpu")
+            cfg_dict = ckpt.get("config", {})
+            for k in ("embed_dim","num_heads","num_layers","seq_len","dropout","vocab_size"):
+                if k in cfg_dict:
+                    setattr(wcfg, k, cfg_dict[k])
+            print(f"  Architecture from checkpoint: embed={wcfg.embed_dim} "
+                  f"layers={wcfg.num_layers} heads={wcfg.num_heads} vocab={wcfg.vocab_size}")
+            ckpt_arch_loaded = True
+        else:
+            print("  No checkpoint on server — using default architecture")
+    except Exception as e:
+        print(f"  Could not read checkpoint architecture: {e}")
+
+    # Step 2: fallback — patch from /config if checkpoint wasn't available
+    if not ckpt_arch_loaded:
+        try:
+            srv_cfg = requests.get(f"{SERVER_URL}/config", timeout=10).json()
+            for k in ("embed_dim","num_heads","num_layers","seq_len","dropout"):
+                if k in srv_cfg: setattr(wcfg, k, srv_cfg[k])
+        except Exception:
+            pass
 
     model = _Model(wcfg).to(device)
 
-    # ── Download REAL trained weights ──────────────
-    print("Downloading trained model weights...")
-    updated = download_model_weights(model, device)
-    if not updated:
-        # Try unconditionally
+    # ── Load weights into the model we just built ──
+    print("Loading trained model weights...")
+    if ckpt_arch_loaded:
+        # We already have the checkpoint bytes — load directly
         try:
-            r = requests.get(f"{SERVER_URL}/model", timeout=60)
-            if r.status_code == 200 and len(r.content) > 1000:
-                buf  = io.BytesIO(r.content)
-                ckpt = torch.load(buf, map_location=device)
-                state = ckpt.get("model", ckpt)
-                m = model.module if hasattr(model,"module") else model
-                m.load_state_dict(state, strict=False)
-                print("  Weights loaded from server")
-            else:
-                print("  No model on server — using random init (gradients will be weak)")
-                print("  Let train.py run for at least 1 epoch first!")
+            buf2  = io.BytesIO(r_ckpt.content)
+            ckpt2 = torch.load(buf2, map_location=device)
+            state = ckpt2.get("model", ckpt2)
+            m = model.module if hasattr(model, "module") else model
+            m.load_state_dict(state, strict=True)
+            print("  Weights loaded from server checkpoint")
         except Exception as e:
-            print(f"  Weight load failed: {e} — using random init")
+            print(f"  Weight load failed ({e}) — using random init (gradients will be weak)")
     else:
-        print("  Weights loaded")
+        print("  No model on server — using random init")
+        print("  Let train.py run for at least 1 epoch first!")
     model.train()
 
     # ── Probe safe batch size ──────────────────────

@@ -316,14 +316,18 @@
 
   <!-- Browser -->
   <div class="option-card" id="card-browser">
-    <div class="option-tag">Option 1 — instant</div>
+    <div class="option-tag">Option 1 — show support</div>
     <div class="option-title">Contribute via browser</div>
-    <div class="option-desc">Click one button and your GPU starts helping — no downloads, no installs.</div>
+    <div class="option-desc">Click one button to join as a supporter. Your browser connects to the training pool and sends participation signals. For real GPU gradient contribution, use worker.py below.</div>
     <ul class="option-pros">
-      <li>Works instantly</li>
-      <li>No install needed</li>
+      <li>Works instantly — no install</li>
+      <li>Shows your support on the dashboard</li>
       <li>Stop anytime</li>
     </ul>
+    <div style="background:#1a0f00; border:1px solid #7f4f00; border-radius:8px; padding:10px 13px; font-size:0.78rem; color:#f59e0b; margin-bottom:4px;">
+      ⚠ Browsers cannot run real PyTorch — gradients from this option are symbolic only
+      and do not improve training. Use <b>worker.py</b> for real GPU contribution.
+    </div>
     <div class="vram-info" id="vram-info-browser"></div>
     <div class="cpu-toggle">
       <div class="toggle-switch" id="cpu-toggle" onclick="toggleCPU()">
@@ -336,7 +340,7 @@
              oninput="document.getElementById('cpu-pct-val').textContent=this.value+'%'">
       <span class="cpu-pct-val" id="cpu-pct-val">10%</span>
     </div>
-    <button class="btn" id="btn-browser" onclick="startBrowser()">Start Contributing</button>
+    <button class="btn" id="btn-browser" onclick="startBrowser()">Join as Supporter</button>
     <button class="btn-outline" id="btn-browser-stop" onclick="stopBrowser()" style="display:none">Stop</button>
   </div>
 
